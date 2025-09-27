@@ -1,0 +1,118 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Tibber Smart Scheduler",
+        "description": "Select your price sensor",
+        "data": {
+          "tibber_sensor": "Price Sensor"
+        }
+      }
+    },
+    "error": {
+      "sensor_not_found": "Sensor not found",
+      "sensor_required": "Please select a sensor"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Tibber Smart Scheduler",
+        "description": "Choose what you want to do",
+        "data": {
+          "menu_action": "Action"
+        }
+      },
+      "add_device": {
+        "title": "Add New Device",
+        "description": "Configure a new smart device with all features",
+        "data": {
+          "name": "Device Name",
+          "entities": "Controlled Entities",
+          "device_mode": "Operation Mode",
+          "enabled": "Enable Device",
+          "power_sensor": "Power Sensor",
+          "min_power_detection": "Min Power Detection (Watts)",
+          "max_power_detection": "Max Power Detection (Watts)", 
+          "power_change_threshold": "Power Change Threshold (Watts)",
+          "min_runtime_minutes": "Min Runtime (Minutes)",
+          "recording_enabled": "Enable Recording",
+          "recording_interval": "Recording Interval",
+          "max_recording_days": "Max Recording Days",
+          "record_power_data": "Record Power Data",
+          "record_price_data": "Record Price Data",
+          "export_csv_enabled": "Enable CSV Export",
+          "price_threshold": "Price Threshold (€/kWh)",
+          "price_cutoff_threshold": "Price Cutoff Threshold (€/kWh)",
+          "price_resume_threshold": "Price Resume Threshold (€/kWh)",
+          "use_cost_rate_attribute": "Use Cost Rate Attribute",
+          "cost_rate_cutoff": "Cost Rate Cutoff Level",
+          "cost_rate_resume": "Cost Rate Resume Level",
+          "duration": "Duration (minutes)",
+          "search_length": "Search Length (hours)",
+          "schedule_type": "Schedule Type",
+          "priority": "Priority Level",
+          "max_price_factor": "Max Price Factor",
+          "same_day_only": "Same Day Only",
+          "predefined_time_slots": "Predefined Time Slots",
+          "allow_split_runs": "Allow Split Runs",
+          "max_splits": "Max Splits",
+          "time_window_start": "Time Window Start",
+          "time_window_end": "Time Window End",
+          "blackout_periods": "Blackout Periods",
+          "preferred_periods": "Preferred Periods",
+          "power_filtering_enabled": "Enable Power Filtering",
+          "home_power_sensor": "Home Power Sensor",
+          "max_power_threshold": "Max Power Threshold (Watts)",
+          "device_power_consumption": "Device Power Consumption (Watts)",
+          "power_safety_margin": "Power Safety Margin (Watts)",
+          "allow_manual_when_over_threshold": "Allow Manual Override",
+          "efficiency_monitoring": "Enable Efficiency Monitoring",
+          "cost_tracking": "Enable Cost Tracking",
+          "performance_analysis": "Enable Performance Analysis",
+          "anomaly_detection": "Enable Anomaly Detection",
+          "notify_on_start": "Notify on Start",
+          "notify_on_completion": "Notify on Completion",
+          "notify_on_price_spike": "Notify on Price Spikes",
+          "auto_resume_after_cutoff": "Auto Resume After Cutoff",
+          "max_delay_hours": "Max Delay (Hours)",
+          "grace_period_minutes": "Grace Period (Minutes)",
+          "warmup_time_minutes": "Warmup Time (Minutes)",
+          "cooldown_time_minutes": "Cooldown Time (Minutes)"
+        }
+      },
+      "edit_device": {
+        "title": "Edit Device",
+        "description": "Select device to edit",
+        "data": {
+          "device_to_edit": "Device"
+        }
+      },
+      "edit_device_config": {
+        "title": "Edit Device Configuration",
+        "description": "Update all device settings"
+      },
+      "remove_device": {
+        "title": "Remove Device",
+        "description": "Select device to remove",
+        "data": {
+          "device_to_remove": "Device"
+        }
+      }
+    },
+    "error": {
+      "no_devices": "No devices configured",
+      "coordinator_error": "Integration error",
+      "add_device_error": "Failed to add device",
+      "update_error": "Failed to update device",
+      "remove_error": "Failed to remove device",
+      "name_required": "Device name is required",
+      "entities_required": "At least one entity is required"
+    },
+    "abort": {
+      "no_devices": "No devices to edit",
+      "no_device_name": "No device name provided",
+      "update_error": "Failed to update configuration",
+      "remove_error": "Failed to remove device"
+    }
+  }

@@ -1,0 +1,66 @@
+# Simple Dashboard Cards for Tibber Smart Scheduler
+
+# Entity Card - Shows main scheduler with status
+type: entity
+entity: switch.tibber_scheduler_dishwasher
+name: "Dishwasher Scheduler"
+attribute: window_status
+icon: mdi:dishwasher
+
+# Entities Card - Complete control panel
+---
+type: entities
+title: Tibber Dishwasher Control
+show_header_toggle: false
+entities:
+  - entity: switch.tibber_scheduler_dishwasher
+    name: "Scheduler Enabled"
+    secondary_info: attribute
+    attribute: window_status
+    
+  - entity: switch.tibber_override_dishwasher
+    name: "Manual Override" 
+    secondary_info: attribute
+    attribute: override_until
+    
+  - type: divider
+  
+  - type: attribute
+    entity: switch.tibber_scheduler_dishwasher
+    attribute: next_start
+    name: "Next Start"
+    icon: mdi:clock-start
+    
+  - type: attribute
+    entity: switch.tibber_scheduler_dishwasher
+    attribute: next_stop
+    name: "Next Stop"
+    icon: mdi:clock-end
+    
+  - type: attribute
+    entity: switch.tibber_scheduler_dishwasher
+    attribute: current_price
+    name: "Current Price"
+    suffix: " €/kWh"
+    icon: mdi:currency-eur
+
+# Glance Card - Quick overview
+---
+type: glance
+title: Tibber Status
+entities:
+  - entity: switch.tibber_scheduler_dishwasher
+    name: "Scheduler"
+    
+  - entity: switch.tibber_override_dishwasher
+    name: "Override"
+    
+  - entity: switch.tibber_scheduler_dishwasher
+    attribute: window_status
+    name: "Status"
+    icon: mdi:information
+    
+  - entity: switch.tibber_scheduler_dishwasher
+    attribute: current_price
+    name: "Price"
+    icon: mdi:currency-eur

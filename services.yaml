@@ -1,0 +1,72 @@
+manual_start:
+  name: Manual Start
+  description: "Start device manually (considers power limits)"
+  target:
+    entity:
+      domain: switch
+      integration: tibber_smart_scheduler
+  fields:
+    duration:
+      name: Duration
+      description: "Duration in minutes"
+      required: false
+      default: 120
+      selector:
+        number:
+          min: 1
+          max: 1440
+          unit_of_measurement: "minutes"
+
+force_start:
+  name: Force Start
+  description: "Force start device ignoring ALL limits"
+  target:
+    entity:
+      domain: switch
+      integration: tibber_smart_scheduler
+  fields:
+    duration:
+      name: Duration
+      description: "Duration in minutes" 
+      required: false
+      default: 120
+      selector:
+        number:
+          min: 1
+          max: 1440
+          unit_of_measurement: "minutes"
+
+manual_stop:
+  name: Manual Stop
+  description: "Stop device immediately"
+  target:
+    entity:
+      domain: switch
+      integration: tibber_smart_scheduler
+
+manual_override:
+  name: Manual Override
+  description: "Disable automation temporarily"
+  target:
+    entity:
+      domain: switch
+      integration: tibber_smart_scheduler
+  fields:
+    duration:
+      name: Duration
+      description: "Override duration in minutes"
+      required: false
+      default: 60
+      selector:
+        number:
+          min: 1
+          max: 1440
+          unit_of_measurement: "minutes"
+
+update_schedules:
+  name: Update Schedules
+  description: "Force update all schedules"
+  target:
+    entity:
+      domain: switch
+      integration: tibber_smart_scheduler

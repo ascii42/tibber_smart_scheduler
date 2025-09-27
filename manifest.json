@@ -1,0 +1,13 @@
+{
+  "domain": "tibber_smart_scheduler",
+  "name": "Tibber Smart Scheduler",
+  "version": "1.1.0",
+  "documentation": "https://github.com/ascii42/tibber_smart_scheduler",
+  "dependencies": [],
+  "codeowners": ["@ascii42"],
+  "requirements": [],
+  "config_flow": true,
+  "iot_class": "local_polling",
+  "integration_type": "hub",
+  "brand": "tibber"
+}

@@ -1,0 +1,73 @@
+# Tibber Smart Scheduler Dashboard Card Example
+
+type: entities
+title: Tibber Smart Scheduler
+show_header_toggle: false
+entities:
+  # Main scheduler switch
+  - entity: switch.tibber_scheduler_dishwasher
+    name: "Dishwasher Scheduler"
+    secondary_info: attribute
+    attribute: window_status
+    icon: mdi:dishwasher
+    tap_action:
+      action: more-info
+  
+  # Manual override switch  
+  - entity: switch.tibber_override_dishwasher
+    name: "Manual Override"
+    secondary_info: attribute
+    attribute: override_until
+    
+  # Next run window info
+  - type: attribute
+    entity: switch.tibber_scheduler_dishwasher
+    attribute: next_start
+    name: "Next Start"
+    icon: mdi:clock-start
+    
+  - type: attribute
+    entity: switch.tibber_scheduler_dishwasher
+    attribute: next_stop
+    name: "Next Stop"
+    icon: mdi:clock-end
+    
+  # Current price info
+  - type: attribute
+    entity: switch.tibber_scheduler_dishwasher
+    attribute: current_price
+    name: "Current Price"
+    suffix: " €/kWh"
+    icon: mdi:currency-eur
+
+# Alternative: Grid card layout
+---
+type: grid
+square: false
+columns: 2
+cards:
+  - type: entity
+    entity: switch.tibber_scheduler_dishwasher
+    name: "Scheduler"
+    
+  - type: entity  
+    entity: switch.tibber_override_dishwasher
+    name: "Override"
+    
+  - type: glance
+    entities:
+      - entity: switch.tibber_scheduler_dishwasher
+        attribute: next_start
+        name: "Start"
+      - entity: switch.tibber_scheduler_dishwasher
+        attribute: next_stop  
+        name: "Stop"
+        
+  - type: glance
+    entities:
+      - entity: switch.tibber_scheduler_dishwasher
+        attribute: current_price
+        name: "Price"
+      - entity: switch.tibber_scheduler_dishwasher
+        attribute: window_status
+        name: "Status"

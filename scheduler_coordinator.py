@@ -165,7 +165,7 @@ class TibberSchedulingCoordinator:
         """Calculate optimal periods and schedule device to run automatically."""
         device_config = self.devices[device_name]
         duration_minutes = device_config.get('duration', 120)
-        search_length_hours = device_config.get('search_length', 24)  # Use 24h by default
+        search_length_hours = device_config.get('search_length', 8)
         
         # Find optimal periods
         optimal_periods = self._find_optimal_periods(

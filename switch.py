@@ -29,16 +29,48 @@ async def async_setup_entry(
 
         switches = []
 
+        _LOGGER.info(f"Switch setup: Found {len(coordinator.devices)} configured devices: {list(coordinator.devices.keys())}")
+
+        # If no devices configured, create default device for dishwasher
+        if not coordinator.devices:
+            _LOGGER.warning("No devices configured, creating default 'dishwasher' device")
+            default_device = {
+                'entities': [],
+                'duration': 120,
+                'power_sensor': 'none',
+                'device_mode': 'smart_delay',
+                'enabled': True,
+                'search_length': 8,
+                'price_threshold': 0.30
+            }
+            coordinator.devices['dishwasher'] = default_device
+            coordinator._init_device_state('dishwasher')
+            await coordinator.async_save_devices()
+
         # Create main scheduler switch for each configured device
         for device_name in coordinator.devices:
-            _LOGGER.info(f"Creating scheduler switch for device: {device_name}")
-            switches.append(TibberSchedulerSwitch(coordinator, device_name))
+            try:
+                _LOGGER.info(f"Creating switches for device: {device_name}")
 
-            # Create device power control switch
-            switches.append(TibberDevicePowerSwitch(coordinator, device_name))
+                # Create main scheduler switch
+                main_switch = TibberSchedulerSwitch(coordinator, device_name)
+                switches.append(main_switch)
+                _LOGGER.info(f"✅ Created main scheduler switch: {main_switch.name}")
 
-            # Create automatic/manual mode switch
-            switches.append(TibberAutomaticModeSwitch(coordinator, device_name))
+                # Create device power control switch
+                power_switch = TibberDevicePowerSwitch(coordinator, device_name)
+                switches.append(power_switch)
+                _LOGGER.info(f"✅ Created power control switch: {power_switch.name}")
+
+                # Create automatic/manual mode switch
+                auto_switch = TibberAutomaticModeSwitch(coordinator, device_name)
+                switches.append(auto_switch)
+                _LOGGER.info(f"✅ Created automation mode switch: {auto_switch.name}")
+
+            except Exception as e:
+                _LOGGER.error(f"❌ Error creating switches for device {device_name}: {e}")
+                import traceback
+                _LOGGER.error(f"❌ Traceback: {traceback.format_exc()}")
 
         if switches:
             async_add_entities(switches)
@@ -79,6 +111,11 @@ class TibberSchedulerSwitch(SwitchEntity, RestoreEntity):
             "model": "Smart Price Scheduler with Power Detection",
             "sw_version": "0.6.0",
         }
+
+    @property
+    def name(self) -> str:
+        """Return the name of the switch."""
+        return self._attr_name
 
     @property
     def is_on(self) -> bool:
@@ -243,12 +280,33 @@ class TibberSchedulerSwitch(SwitchEntity, RestoreEntity):
         """Get stable timing data with proper caching."""
         current_time = datetime.now()
 
-        # Check if we should recalculate schedule (1 hour cache or if no cache)
-        should_recalculate = (
-            not self._last_schedule_calculation or
-            not self._cached_schedule or
-            (current_time - self._last_schedule_calculation).total_seconds() > self._schedule_cache_duration
-        )
+        # Determine if we should recalculate
+        # Only recalculate if:
+        # 1. No cache exists
+        # 2. Cache is very old (> 4 hours, to catch tomorrow's price updates)
+        # 3. Scheduled window has already passed
+        should_recalculate = False
+
+        if not self._last_schedule_calculation or not self._cached_schedule:
+            # No cache, must calculate
+            should_recalculate = True
+        else:
+            # Check if cache is very old (4 hours) - to catch new tomorrow prices
+            cache_age_seconds = (current_time - self._last_schedule_calculation).total_seconds()
+            if cache_age_seconds > 4 * 3600:
+                should_recalculate = True
+                _LOGGER.info(f"Recalculating schedule for {self._device_name}: cache age {cache_age_seconds/3600:.1f}h")
+            # Check if scheduled window has passed
+            elif 'next_start_datetime' in self._cached_schedule:
+                try:
+                    scheduled_start = datetime.fromisoformat(self._cached_schedule['next_start_datetime'])
+                    scheduled_end = datetime.fromisoformat(self._cached_schedule['next_stop_datetime'])
+                    # Only recalculate if window has completely passed
+                    if current_time > scheduled_end:
+                        should_recalculate = True
+                        _LOGGER.info(f"Recalculating schedule for {self._device_name}: window has passed")
+                except (ValueError, TypeError):
+                    should_recalculate = True
 
         # Always check current device state first
         device_running = device_state.get('device_running', False)
@@ -307,21 +365,41 @@ class TibberSchedulerSwitch(SwitchEntity, RestoreEntity):
                     next_start = datetime.fromisoformat(cached_result['next_start_datetime'])
                     next_stop = datetime.fromisoformat(cached_result['next_stop_datetime'])
 
-                    # Only use cached schedule if it's still in the future
-                    if next_start > current_time:
-                        cached_result['minutes_until_start'] = max(0, int((next_start - current_time).total_seconds() / 60))
+                    # Use cached schedule even if start time is near or slightly past
+                    # (as long as we haven't reached the end of the window)
+                    if current_time <= next_stop:
+                        # Calculate accurate countdown
+                        if current_time < next_start:
+                            minutes_until_start = int((next_start - current_time).total_seconds() / 60)
+                            window_status = f'Scheduled for {next_start.strftime("%H:%M")}'
+                        else:
+                            # We're past start but before end - window is active NOW
+                            minutes_until_start = 0
+                            window_status = f'Optimal window active until {next_stop.strftime("%H:%M")}'
+
+                        cached_result['minutes_until_start'] = minutes_until_start
                         cached_result['minutes_until_stop'] = max(0, int((next_stop - current_time).total_seconds() / 60))
+                        cached_result['window_status'] = window_status
                         cached_result['schedule_locked'] = True
+
+                        _LOGGER.debug(f"Using cached schedule for {self._device_name}: {next_start.strftime('%H:%M')}-{next_stop.strftime('%H:%M')}")
                         return cached_result
                 except (ValueError, TypeError):
                     pass
 
         # Calculate new optimal window (only when cache expires or invalid)
         if should_recalculate:
-            optimal_window = self._calculate_stable_optimal_window(device_config)
+            # Use coordinator's optimal windows calculation for consistency
+            optimal_window = self._get_coordinator_optimal_window(device_config)
             if optimal_window:
                 self._cached_schedule = optimal_window
                 self._last_schedule_calculation = current_time
+                _LOGGER.info(
+                    f"📅 NEW SCHEDULE for {self._device_name}: "
+                    f"{optimal_window['start_time'].strftime('%H:%M')}-{optimal_window['end_time'].strftime('%H:%M')} "
+                    f"(avg: {optimal_window.get('avg_price', 0):.3f} €/kWh) "
+                    f"- LOCKED until window passes"
+                )
                 return optimal_window
 
         # Return default if no schedule found
@@ -338,6 +416,62 @@ class TibberSchedulerSwitch(SwitchEntity, RestoreEntity):
             'optimal_avg_price': None,
             'schedule_locked': False,
         }
+
+    def _get_coordinator_optimal_window(self, device_config: dict) -> Optional[dict]:
+        """Get optimal window from coordinator's calculation."""
+        try:
+            # Import asyncio to run async coordinator method
+            import asyncio
+
+            # Get optimal windows from coordinator (this returns a list)
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We're in sync context but loop is running - can't await
+                # Fall back to local calculation
+                return self._calculate_stable_optimal_window(device_config)
+
+            optimal_windows = loop.run_until_complete(
+                self._coordinator._get_optimal_windows_for_device(self._device_name)
+            )
+
+            if not optimal_windows:
+                return None
+
+            # Use the first optimal window
+            first_window = optimal_windows[0]
+            window_start = first_window['start_time']
+            window_end = first_window['end_time']
+            avg_price = first_window.get('avg_price', 0)
+
+            # Convert to the format expected by switch display
+            current_time = datetime.now()
+            minutes_until_start = max(0, int((window_start - current_time).total_seconds() / 60))
+            minutes_until_stop = max(0, int((window_end - current_time).total_seconds() / 60))
+
+            if current_time < window_start:
+                window_status = f'Scheduled for {window_start.strftime("%H:%M")}'
+            else:
+                window_status = f'Optimal window active until {window_end.strftime("%H:%M")}'
+
+            return {
+                'next_start': window_start.strftime('%H:%M'),
+                'next_stop': window_end.strftime('%H:%M'),
+                'next_start_date': window_start.strftime('%Y-%m-%d'),
+                'next_stop_date': window_end.strftime('%Y-%m-%d'),
+                'next_start_datetime': window_start.isoformat(),
+                'next_stop_datetime': window_end.isoformat(),
+                'minutes_until_start': minutes_until_start,
+                'minutes_until_stop': minutes_until_stop,
+                'window_status': window_status,
+                'optimal_avg_price': avg_price,
+                'schedule_locked': True,
+                'start_time': window_start,
+                'end_time': window_end,
+                'avg_price': avg_price
+            }
+        except Exception as e:
+            _LOGGER.warning(f"Could not get optimal window from coordinator: {e}, falling back to local calculation")
+            return self._calculate_stable_optimal_window(device_config)
 
     def _calculate_stable_optimal_window(self, device_config: dict) -> Optional[dict]:
         """Calculate optimal window that remains stable for longer periods."""
@@ -433,53 +567,122 @@ class TibberSchedulerSwitch(SwitchEntity, RestoreEntity):
             return None
 
     def _find_stable_optimal_period(self, prices: list, duration_minutes: int, search_hours: int) -> Optional[dict]:
-        """Find optimal period with hour-boundary alignment for stability."""
+        """Find optimal period with split-run support for long durations."""
         current_time = datetime.now()
 
-        # For split runs and long durations, search the full forecast period
-        # Don't limit by search_hours for more comprehensive scheduling
-        next_hour = current_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-        relevant_prices = [p for p in prices if p['time'] >= next_hour]
+        # Filter to future prices only (from current time)
+        future_prices = [p for p in prices if p['time'] >= current_time]
 
+        if not future_prices:
+            return None
+
+        # Apply search_length window (e.g., 8 hours from NOW)
+        search_end = current_time + timedelta(hours=search_hours)
+
+        # Limit search_end to last available data to prevent scheduling beyond available prices
+        if prices:
+            last_data_time = max(p['time'] for p in prices)
+            if search_end > last_data_time:
+                _LOGGER.debug(f"Limiting search to available data: {last_data_time.strftime('%H:%M')} (search_length would be {search_end.strftime('%H:%M')})")
+                search_end = last_data_time
+
+        relevant_prices = [p for p in future_prices if p['time'] <= search_end]
+
+        if not relevant_prices:
+            return None
+
+        # Get device config for split run settings
+        device_config = self._coordinator.devices.get(self._device_name, {})
+        allow_split_runs = device_config.get('allow_split_runs', True)
+
+        # For short durations or if splits not allowed, find single window
+        if duration_minutes <= 60 or not allow_split_runs:
+            return self._find_single_window(relevant_prices, duration_minutes)
+        else:
+            # For long durations, try split runs
+            return self._find_split_windows(relevant_prices, duration_minutes)
+
+    def _find_single_window(self, prices: list, duration_minutes: int) -> Optional[dict]:
+        """Find single optimal window."""
         duration_hours = max(1, duration_minutes // 60)
 
-        # Find cheapest consecutive period first (preferred)
+        if len(prices) < duration_hours:
+            return None
+
         best_period = None
         best_avg_price = float('inf')
 
-        if len(relevant_prices) >= duration_hours:
-            for i in range(len(relevant_prices) - duration_hours + 1):
-                period_prices = relevant_prices[i:i + duration_hours]
-                avg_price = sum(p['price'] for p in period_prices) / len(period_prices)
+        for i in range(len(prices) - duration_hours + 1):
+            period_prices = prices[i:i + duration_hours]
+            avg_price = sum(p['price'] for p in period_prices) / len(period_prices)
 
-                if avg_price < best_avg_price:
-                    best_avg_price = avg_price
-                    start_time = period_prices[0]['time']
-                    end_time = start_time + timedelta(minutes=duration_minutes)
+            if avg_price < best_avg_price:
+                best_avg_price = avg_price
+                start_time = period_prices[0]['time']
+                end_time = start_time + timedelta(minutes=duration_minutes)
 
-                    best_period = {
-                        'start_time': start_time,
-                        'end_time': end_time,
-                        'avg_price': avg_price,
-                        'split_run': False
-                    }
-
-        # If no consecutive period found and we have prices, return earliest for split runs
-        if not best_period and relevant_prices:
-            # For split runs, return the earliest cheap period
-            start_time = relevant_prices[0]['time']
-            # Use shorter window for split runs
-            split_duration = min(duration_minutes, 60)  # Max 1 hour chunks
-            end_time = start_time + timedelta(minutes=split_duration)
-
-            best_period = {
-                'start_time': start_time,
-                'end_time': end_time,
-                'avg_price': relevant_prices[0]['price'],
-                'split_run': True
-            }
+                best_period = {
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'avg_price': avg_price,
+                    'duration_minutes': duration_minutes,
+                    'is_split_run': False
+                }
 
         return best_period
+
+    def _find_split_windows(self, prices: list, duration_minutes: int) -> Optional[dict]:
+        """Find multiple optimal windows for split runs."""
+        max_chunk_duration = 60  # 1 hour chunks
+        chunks_needed = (duration_minutes + max_chunk_duration - 1) // max_chunk_duration
+
+        if len(prices) < chunks_needed:
+            return None
+
+        # Sort by price to find cheapest hours
+        sorted_prices = sorted(prices, key=lambda x: x['price'])
+        selected_hours = sorted_prices[:chunks_needed]
+
+        # Sort back by time
+        selected_hours.sort(key=lambda x: x['time'])
+
+        # Create split windows
+        split_windows = []
+        total_duration = 0
+
+        for i, hour in enumerate(selected_hours):
+            remaining_duration = duration_minutes - total_duration
+            chunk_duration = min(max_chunk_duration, remaining_duration)
+
+            split_windows.append({
+                'start_time': hour['time'],
+                'end_time': hour['time'] + timedelta(minutes=chunk_duration),
+                'duration_minutes': chunk_duration
+            })
+
+            total_duration += chunk_duration
+
+            if total_duration >= duration_minutes:
+                break
+
+        if not split_windows:
+            return None
+
+        # Calculate average price
+        avg_price = sum(h['price'] for h in selected_hours[:len(split_windows)]) / len(split_windows)
+
+        # Return first window with split info
+        first_window = split_windows[0]
+
+        return {
+            'start_time': first_window['start_time'],
+            'end_time': first_window['end_time'],
+            'avg_price': avg_price,
+            'duration_minutes': first_window['duration_minutes'],
+            'is_split_run': True,
+            'split_windows': split_windows,
+            'total_duration_minutes': duration_minutes
+        }
 
     def _generate_chart_data(self, device_config: dict) -> dict:
         """Generate chart visualization data showing prices and scheduled windows."""
@@ -549,13 +752,28 @@ class TibberSchedulerSwitch(SwitchEntity, RestoreEntity):
                 )
 
                 if optimal_window:
-                    chart_data['schedule_windows'].append({
-                        'start': optimal_window['start_time'].strftime('%H:%M'),
-                        'end': optimal_window['end_time'].strftime('%H:%M'),
-                        'start_date': optimal_window['start_time'].strftime('%Y-%m-%d'),
-                        'avg_price': round(optimal_window['avg_price'], 3),
-                        'type': 'optimal'
-                    })
+                    # Handle split windows
+                    if optimal_window.get('is_split_run') and optimal_window.get('split_windows'):
+                        # Add each split window separately
+                        for i, split_window in enumerate(optimal_window['split_windows']):
+                            chart_data['schedule_windows'].append({
+                                'start': split_window['start_time'].strftime('%H:%M'),
+                                'end': split_window['end_time'].strftime('%H:%M'),
+                                'start_date': split_window['start_time'].strftime('%Y-%m-%d'),
+                                'avg_price': round(optimal_window['avg_price'], 3),
+                                'type': f'split_{i+1}_of_{len(optimal_window["split_windows"])}',
+                                'split_part': i + 1,
+                                'total_splits': len(optimal_window['split_windows'])
+                            })
+                    else:
+                        # Single window
+                        chart_data['schedule_windows'].append({
+                            'start': optimal_window['start_time'].strftime('%H:%M'),
+                            'end': optimal_window['end_time'].strftime('%H:%M'),
+                            'start_date': optimal_window['start_time'].strftime('%Y-%m-%d'),
+                            'avg_price': round(optimal_window['avg_price'], 3),
+                            'type': 'optimal'
+                        })
 
             # Generate simple chart URL (using a simple chart service or base64 encoded SVG)
             chart_url = self._create_simple_chart_svg(chart_data)
@@ -778,7 +996,12 @@ class TibberDevicePowerSwitch(SwitchEntity):
         self._attr_name = f"{device_name.replace('_', ' ').title()} Power"
         self._attr_unique_id = f"{coordinator.entry.entry_id}_{device_name}_power"
         self._attr_icon = "mdi:power"
-        self._attr_entity_category = "config"
+        self._attr_entity_category = None  # Make visible as regular switch
+
+    @property
+    def name(self) -> str:
+        """Return the name of the switch."""
+        return self._attr_name
 
     @property
     def device_info(self):
@@ -795,7 +1018,27 @@ class TibberDevicePowerSwitch(SwitchEntity):
     def is_on(self) -> bool:
         """Return true if the device is running."""
         device_state = self._coordinator.device_states.get(self._device_name, {})
-        return device_state.get('device_running', False)
+        device_running = device_state.get('device_running', False)
+
+        # Verify against actual entity states for sync
+        device_config = self._coordinator.devices.get(self._device_name, {})
+        entities = device_config.get('entities', [])
+
+        if entities:
+            # Check if any controlled entity is actually on
+            any_entity_on = False
+            for entity_id in entities:
+                entity_state = self.hass.states.get(entity_id)
+                if entity_state and entity_state.state == STATE_ON:
+                    any_entity_on = True
+                    break
+
+            # Sync device_running state with actual entity states
+            if any_entity_on != device_running:
+                device_state['device_running'] = any_entity_on
+                return any_entity_on
+
+        return device_running
 
     @property
     def available(self) -> bool:
@@ -892,7 +1135,12 @@ class TibberAutomaticModeSwitch(SwitchEntity):
         self._attr_name = f"{device_name.replace('_', ' ').title()} Automatic Mode"
         self._attr_unique_id = f"{coordinator.entry.entry_id}_{device_name}_auto_mode"
         self._attr_icon = "mdi:robot"
-        self._attr_entity_category = "config"
+        self._attr_entity_category = None  # Make visible as regular switch
+
+    @property
+    def name(self) -> str:
+        """Return the name of the switch."""
+        return self._attr_name
 
     @property
     def device_info(self):

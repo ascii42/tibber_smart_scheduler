@@ -17,7 +17,7 @@ _LOGGER = logging.getLogger(__name__)
 
 class TibberSmartCoordinator:
     """Enhanced coordinator with stable schedule management."""
-    
+
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry):
         self.hass = hass
         self.entry = entry
@@ -28,11 +28,149 @@ class TibberSmartCoordinator:
         self._unsub_update = None
         self._unsub_state_change = None
         self._unsub_entity_changes = []
+        self._unsub_api_fetch = None
         self._async_add_entities = None
         self._scheduled_tasks = {}  # Track scheduled start tasks
-        
-        _LOGGER.info(f"Coordinator initialized with Tibber sensor: {self.tibber_sensor}")
-        
+
+        # API data cache
+        self._api_price_cache = None
+        self._api_cache_timestamp = None
+        self._api_cache_duration = timedelta(minutes=15)  # Cache for 15 minutes
+
+        # Global price level settings
+        self.global_min_price_level = entry.data.get("global_min_price_level", 0.15)
+        self.price_stability_threshold = entry.data.get("price_stability_threshold", 0.20)
+        self.enable_always_on_mode = entry.data.get("enable_always_on_mode", False)
+
+        _LOGGER.info(
+            f"Coordinator initialized - Sensor: {self.tibber_sensor}, "
+            f"Global min price: {self.global_min_price_level}€, "
+            f"Stability threshold: {self.price_stability_threshold*100}%, "
+            f"Always-on mode: {self.enable_always_on_mode}"
+        )
+
+    def _check_stable_price_mode(self, current_price: float, device_config: dict) -> dict:
+        """
+        Check if we're in stable price mode where devices should stay on.
+
+        Returns dict with:
+        - use_scheduler: bool - whether to use normal scheduling
+        - reason: str - explanation
+        - allow_run: bool - whether to allow device to run
+        """
+        if not self.enable_always_on_mode:
+            return {"use_scheduler": True, "reason": "Always-on mode disabled", "allow_run": False}
+
+        # Get search length hours of price data
+        try:
+            tibber_state = self.hass.states.get(self.tibber_sensor)
+            if not tibber_state:
+                return {"use_scheduler": True, "reason": "No price data", "allow_run": False}
+
+            search_hours = device_config.get('search_length', 8)
+            today_prices = tibber_state.attributes.get('today', [])
+            tomorrow_prices = tibber_state.attributes.get('tomorrow', [])
+
+            # Combine prices
+            all_prices = []
+            for price_data in today_prices + tomorrow_prices[:search_hours]:
+                if 'starts_at' in price_data:
+                    try:
+                        price_time = datetime.fromisoformat(price_data['starts_at'].replace('Z', '+00:00'))
+                        if price_time.tzinfo:
+                            price_time = price_time.replace(tzinfo=None)
+
+                        price = float(price_data.get('total', 0))
+                        all_prices.append(price)
+                    except:
+                        continue
+
+            if not all_prices:
+                return {"use_scheduler": True, "reason": "No price data", "allow_run": False}
+
+            # Check if current price is below global minimum level
+            if current_price > self.global_min_price_level:
+                return {
+                    "use_scheduler": True,
+                    "reason": f"Price {current_price:.3f}€ > global min {self.global_min_price_level:.3f}€",
+                    "allow_run": False
+                }
+
+            # Calculate minimum price in search window
+            min_price_in_window = min(all_prices)
+
+            # Check if there's a significant price drop opportunity
+            # e.g., if stability_threshold = 0.20 (20%), and current = 0.20€,
+            # only use scheduler if min price is < 0.16€ (20% lower)
+            threshold_price = current_price * (1 - self.price_stability_threshold)
+
+            if min_price_in_window < threshold_price:
+                return {
+                    "use_scheduler": True,
+                    "reason": f"Significant drop available: min {min_price_in_window:.3f}€ < threshold {threshold_price:.3f}€",
+                    "allow_run": False
+                }
+
+            # Stable low price - keep devices running
+            return {
+                "use_scheduler": False,
+                "reason": f"Stable low price: {current_price:.3f}€ < {self.global_min_price_level:.3f}€, no significant drops in window",
+                "allow_run": True
+            }
+
+        except Exception as e:
+            _LOGGER.error(f"Error checking stable price mode: {e}")
+            return {"use_scheduler": True, "reason": "Error checking", "allow_run": False}
+
+    async def get_price_forecast(self) -> Optional[Dict]:
+        """Get price forecast data from cache or API."""
+        from homeassistant.util import dt as dt_util
+
+        current_time = dt_util.now()
+
+        # Check if cache is valid
+        if self._api_price_cache and self._api_cache_timestamp:
+            age = current_time - self._api_cache_timestamp
+            if age < self._api_cache_duration:
+                _LOGGER.debug(f"Using cached API data (age: {age.total_seconds():.0f}s)")
+                return self._api_price_cache
+
+        # Fetch new data from API
+        api_token = self.entry.data.get("tibber_api_token")
+        if not api_token:
+            _LOGGER.debug("No API token configured")
+            return None
+
+        try:
+            from homeassistant.helpers.aiohttp_client import async_get_clientsession
+            from .tibber_api import TibberApiClient
+
+            session = async_get_clientsession(self.hass)
+            home_id = self.entry.data.get("tibber_home_id")
+
+            client = TibberApiClient(api_token, session=session)
+            price_info = await client.get_price_info(home_id=home_id)
+
+            if price_info:
+                formatted_data = client.format_price_data(price_info)
+
+                # Cache the result
+                self._api_price_cache = formatted_data
+                self._api_cache_timestamp = current_time
+
+                today_count = len(formatted_data.get("today", []))
+                tomorrow_count = len(formatted_data.get("tomorrow", []))
+                _LOGGER.info(f"✅ Fetched fresh price data from Tibber API: {today_count} today, {tomorrow_count} tomorrow")
+
+                return formatted_data
+            else:
+                _LOGGER.warning("API returned no price info")
+                return None
+
+        except Exception as e:
+            _LOGGER.error(f"Error fetching from Tibber API: {e}")
+            return None
+
     async def async_load_devices(self):
         """Load devices from storage."""
         try:
@@ -88,8 +226,8 @@ class TibberSmartCoordinator:
         
         # Create switch entity
         if self._async_add_entities:
-            from .switch import UnifiedTibberSwitch
-            new_entity = UnifiedTibberSwitch(self, device_name)
+            from .switch import TibberSchedulerSwitch
+            new_entity = TibberSchedulerSwitch(self, device_name)
             self._async_add_entities([new_entity])
         
         await self.async_save_devices()
@@ -568,9 +706,97 @@ class TibberSmartCoordinator:
         # Keep only last 50 records
         if len(device_state['program_history']) > 50:
             device_state['program_history'] = device_state['program_history'][-50:]
-        
+
+        # Analyze and learn program profile
+        await self._analyze_and_learn_program_profile(device_name, program_record)
+
         await self.async_save_devices()
         _LOGGER.debug(f"Recorded program completion for {device_name}")
+
+    async def _analyze_and_learn_program_profile(self, device_name: str, program_record: Dict):
+        """Analyze power consumption pattern and create/update program profile."""
+        device_state = self.device_states[device_name]
+        device_config = self.devices[device_name]
+
+        # Get power sensor data
+        power_entity = device_config.get('power_sensor')
+        if not power_entity:
+            return
+
+        # Initialize program_profiles if needed
+        if 'program_profiles' not in device_state:
+            device_state['program_profiles'] = {}
+
+        actual_duration = program_record.get('actual_duration')
+        if not actual_duration or actual_duration < 5:  # Ignore very short runs
+            return
+
+        # Round duration to nearest 5 minutes for grouping
+        duration_rounded = round(actual_duration / 5) * 5
+
+        # Try to match with existing profile
+        matched_profile = None
+        profile_key = None
+
+        for key, profile in device_state['program_profiles'].items():
+            # Match by duration (±10 minutes tolerance)
+            if abs(profile['avg_duration'] - actual_duration) <= 10:
+                matched_profile = profile
+                profile_key = key
+                break
+
+        if matched_profile:
+            # Update existing profile
+            matched_profile['run_count'] += 1
+            matched_profile['total_duration'] += actual_duration
+            matched_profile['avg_duration'] = matched_profile['total_duration'] / matched_profile['run_count']
+            matched_profile['last_run'] = program_record['completion_time']
+
+            # Update duration range
+            if actual_duration < matched_profile['min_duration']:
+                matched_profile['min_duration'] = actual_duration
+            if actual_duration > matched_profile['max_duration']:
+                matched_profile['max_duration'] = actual_duration
+
+            _LOGGER.info(
+                f"Updated profile '{matched_profile['name']}' for {device_name}: "
+                f"{matched_profile['run_count']} runs, avg {matched_profile['avg_duration']:.0f}min"
+            )
+
+        else:
+            # Create new profile
+            profile_key = f"profile_{len(device_state['program_profiles']) + 1}"
+
+            # Generate name based on duration
+            if duration_rounded <= 30:
+                suggested_name = "Quick Wash"
+            elif duration_rounded <= 60:
+                suggested_name = "Eco 50°C"
+            elif duration_rounded <= 90:
+                suggested_name = "Normal 65°C"
+            elif duration_rounded <= 150:
+                suggested_name = "Intensive 70°C"
+            else:
+                suggested_name = f"{duration_rounded}min Program"
+
+            new_profile = {
+                'name': suggested_name,
+                'run_count': 1,
+                'avg_duration': actual_duration,
+                'min_duration': actual_duration,
+                'max_duration': actual_duration,
+                'total_duration': actual_duration,
+                'first_detected': program_record['completion_time'],
+                'last_run': program_record['completion_time'],
+                'auto_detected': True
+            }
+
+            device_state['program_profiles'][profile_key] = new_profile
+
+            _LOGGER.warning(
+                f"🎯 NEW PROGRAM PROFILE DETECTED for {device_name}: "
+                f"'{suggested_name}' (~{duration_rounded}min)"
+            )
 
     async def _check_price_threshold(self, device_name: str, price_data: Dict):
         """Check price threshold and act accordingly (original Smart Delay logic)."""
@@ -596,7 +822,8 @@ class TibberSmartCoordinator:
                 # Cut off - price too high
                 device_state['state'] = 'cut_off'
                 device_state['waiting_for_cheap_price'] = True
-                
+                device_state['device_running'] = False
+
                 entities = device_config.get(CONF_ENTITIES, [])
                 await self._turn_off_entities(entities)
                 
@@ -628,7 +855,8 @@ class TibberSmartCoordinator:
             # Cut off - cost rate too high
             device_state['state'] = 'cut_off'
             device_state['waiting_for_cheap_price'] = True
-            
+            device_state['device_running'] = False
+
             entities = device_config.get(CONF_ENTITIES, [])
             await self._turn_off_entities(entities)
             
@@ -738,18 +966,35 @@ class TibberSmartCoordinator:
             if not state:
                 _LOGGER.error(f"Tibber sensor not found: {self.tibber_sensor}")
                 return None
-                
+
+            # Check if sensor is available and has valid state
+            if state.state in ['unavailable', 'unknown', None]:
+                _LOGGER.warning(f"Tibber sensor {self.tibber_sensor} is unavailable (state: {state.state})")
+                return None
+
+            # Try to get current price
+            try:
+                current_price = float(state.state)
+            except (ValueError, TypeError):
+                _LOGGER.error(f"Invalid price state from {self.tibber_sensor}: {state.state}")
+                return None
+
+            # Enhanced price data with fallback attributes
             price_data = {
-                'current_price': float(state.state),
+                'current_price': current_price,
                 'current_cost_rate': state.attributes.get('current_cost_rate', 'NORMAL'),
-                'timestamp': datetime.now()
+                'timestamp': datetime.now(),
+                'today_prices_count': len(state.attributes.get('today', [])),
+                'tomorrow_prices_count': len(state.attributes.get('tomorrow', [])),
+                'sensor_available': True
             }
-            
-            _LOGGER.debug(f"Price data: {price_data['current_price']:.3f} EUR/kWh, rate: {price_data['current_cost_rate']}")
+
+            # Log price data for debugging
+            _LOGGER.debug(f"Price data from {self.tibber_sensor}: {price_data['current_price']:.3f} EUR/kWh, rate: {price_data['current_cost_rate']}, today_prices: {price_data['today_prices_count']}, tomorrow_prices: {price_data['tomorrow_prices_count']}")
             return price_data
-            
-        except (ValueError, TypeError) as e:
-            _LOGGER.error(f"Error getting price data: {e}")
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting price data from {self.tibber_sensor}: {e}")
             return None
 
     async def update_schedules(self):
@@ -764,6 +1009,9 @@ class TibberSmartCoordinator:
         for device_name, device_state in self.device_states.items():
             if device_state.get('waiting_for_cheap_price'):
                 await self._check_resume_conditions(device_name, price_data)
+
+        # Check RUNNING devices for price threshold violations
+        await self._check_running_devices_price(price_data)
 
         # Check Smart Delay devices for automatic optimal window starts
         await self._check_smart_delay_auto_starts()
@@ -780,8 +1028,8 @@ class TibberSmartCoordinator:
                 continue
 
             device_mode = device_config.get('device_mode', 'smart_delay')
-            # Support smart_delay, price_protection, and hybrid modes for auto-starts
-            if device_mode not in ['smart_delay', 'price_protection', 'hybrid']:
+            # Support smart_delay, price_protection, hybrid, and active_scheduler modes for auto-starts
+            if device_mode not in ['smart_delay', 'price_protection', 'hybrid', 'active_scheduler']:
                 continue
 
             device_state = self.device_states.get(device_name, {})
@@ -803,17 +1051,23 @@ class TibberSmartCoordinator:
             # Get optimal windows for this device
             optimal_windows = await self._get_optimal_windows_for_device(device_name)
             if not optimal_windows:
+                # Clear scheduled times if no optimal windows
+                device_state['scheduled_start'] = None
+                device_state['scheduled_end'] = None
                 return
 
-            # Check if we're at the start of an optimal window
+            # Update scheduled_start/end with first optimal window for display consistency
+            first_window = optimal_windows[0]
+            device_state['scheduled_start'] = first_window['start_time']
+            device_state['scheduled_end'] = first_window['end_time']
+
+            # Check if we're inside an optimal window NOW
             for window in optimal_windows:
                 window_start = window['start_time']
                 window_end = window['end_time']
 
-                # Check if we should start now (within 5 minutes of window start)
-                time_until_start = (window_start - current_time).total_seconds() / 60
-
-                if -5 <= time_until_start <= 5 and current_time <= window_end:
+                # Start immediately if current time is anywhere inside the optimal window
+                if window_start <= current_time <= window_end:
                     _LOGGER.info(f"SMART DELAY AUTO START: {device_name} at optimal window {window_start.strftime('%H:%M')}")
 
                     # Start the device
@@ -1117,11 +1371,13 @@ class TibberSmartCoordinator:
         for task in self._scheduled_tasks.values():
             task.cancel()
         self._scheduled_tasks.clear()
-        
+
         if self._unsub_update:
             self._unsub_update()
         if self._unsub_state_change:
             self._unsub_state_change()
+        if self._unsub_api_fetch:
+            self._unsub_api_fetch()
         for unsub in self._unsub_entity_changes:
             unsub()
 
@@ -1132,14 +1388,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     
-    # Set up periodic price checks every 5 minutes
+    # Set up periodic price checks every 1 minute for faster cutoff response
     async def update_schedules(now):
         await coordinator.update_schedules()
-    
+
     coordinator._unsub_update = async_track_time_interval(
-        hass, update_schedules, timedelta(minutes=5)
+        hass, update_schedules, timedelta(minutes=1)
     )
-    
+
+    # Periodic API forecast fetch (every 15 minutes)
+    async def fetch_api_forecast(now):
+        """Periodically fetch Tibber API forecast data."""
+        api_token = entry.data.get("tibber_api_token")
+        if api_token:
+            try:
+                from .sensor import get_cached_api_forecast
+                home_id = entry.data.get("tibber_home_id")
+                await get_cached_api_forecast(hass, api_token, home_id)
+            except Exception as e:
+                _LOGGER.debug(f"API forecast fetch error: {e}")
+
+    # Start API fetch timer if token configured
+    if entry.data.get("tibber_api_token"):
+        coordinator._unsub_api_fetch = async_track_time_interval(
+            hass, fetch_api_forecast, timedelta(minutes=15)
+        )
+        # Also fetch immediately on startup
+        hass.async_create_task(fetch_api_forecast(None))
+        _LOGGER.info("Started Tibber API forecast timer (15 min interval)")
+
     # Track price changes for immediate updates
     async def price_changed(event):
         _LOGGER.debug("Price sensor changed - checking delayed devices and schedules")
@@ -1208,6 +1485,150 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info(f"Analytics for {device_name}: {analytics}")
             return analytics
     
+    # Program management services
+    async def handle_add_program(call):
+        """Add a new named program."""
+        device_name = call.data.get("device_name")
+        program_name = call.data.get("program_name")
+        duration = call.data.get("duration")
+        power_consumption = call.data.get("power_consumption")
+
+        if device_name in coordinator.devices:
+            if 'programs' not in coordinator.devices[device_name]:
+                coordinator.devices[device_name]['programs'] = {}
+
+            coordinator.devices[device_name]['programs'][program_name] = {
+                'duration': duration,
+                'power_consumption': power_consumption,
+                'created_at': datetime.now().isoformat(),
+            }
+
+            await coordinator.async_save_devices()
+            _LOGGER.info(f"Added program '{program_name}' to {device_name}: {duration}min, {power_consumption}W")
+
+    async def handle_rename_program(call):
+        """Rename an existing program."""
+        device_name = call.data.get("device_name")
+        old_name = call.data.get("old_name")
+        new_name = call.data.get("new_name")
+
+        if device_name in coordinator.devices:
+            programs = coordinator.devices[device_name].get('programs', {})
+            if old_name in programs:
+                programs[new_name] = programs.pop(old_name)
+                await coordinator.async_save_devices()
+                _LOGGER.info(f"Renamed program '{old_name}' to '{new_name}' for {device_name}")
+
+    async def handle_modify_program(call):
+        """Modify program settings."""
+        device_name = call.data.get("device_name")
+        program_name = call.data.get("program_name")
+        duration = call.data.get("duration")
+        power_consumption = call.data.get("power_consumption")
+
+        if device_name in coordinator.devices:
+            programs = coordinator.devices[device_name].get('programs', {})
+            if program_name in programs:
+                if duration is not None:
+                    programs[program_name]['duration'] = duration
+                if power_consumption is not None:
+                    programs[program_name]['power_consumption'] = power_consumption
+                programs[program_name]['modified_at'] = datetime.now().isoformat()
+
+                await coordinator.async_save_devices()
+                _LOGGER.info(f"Modified program '{program_name}' for {device_name}")
+
+    async def handle_delete_program(call):
+        """Delete a program."""
+        device_name = call.data.get("device_name")
+        program_name = call.data.get("program_name")
+
+        if device_name in coordinator.devices:
+            programs = coordinator.devices[device_name].get('programs', {})
+            if program_name in programs:
+                del programs[program_name]
+                await coordinator.async_save_devices()
+                _LOGGER.info(f"Deleted program '{program_name}' from {device_name}")
+
+    async def handle_start_named_program(call):
+        """Start a device with a named program."""
+        device_name = call.data.get("device_name")
+        program_name = call.data.get("program_name")
+
+        if device_name in coordinator.devices:
+            programs = coordinator.devices[device_name].get('programs', {})
+            if program_name in programs:
+                program = programs[program_name]
+                device_state = coordinator.device_states.get(device_name, {})
+                device_config = coordinator.devices[device_name]
+
+                # Start the device
+                entities = device_config.get(CONF_ENTITIES, [])
+                await coordinator._turn_on_entities(entities)
+
+                # Update state with program info
+                device_state['program_name'] = program_name
+                device_state['device_running'] = True
+                device_state['started_time'] = datetime.now()
+                device_state['estimated_duration'] = program['duration']
+                device_state['program_id'] = f"{device_name}_{program_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+                _LOGGER.info(f"Started '{program_name}' on {device_name} ({program['duration']}min)")
+
+    async def handle_create_program_from_consumption(call):
+        """Create a program from power consumption data."""
+        device_name = call.data.get("device_name")
+        program_name = call.data.get("program_name")
+        start_time_str = call.data.get("start_time")
+        end_time_str = call.data.get("end_time")
+
+        if device_name in coordinator.devices:
+            device_config = coordinator.devices[device_name]
+            power_sensor = device_config.get('power_sensor')
+
+            if not power_sensor or power_sensor == 'none':
+                _LOGGER.error(f"No power sensor configured for {device_name}")
+                return
+
+            # Parse times
+            if start_time_str:
+                start_time = datetime.fromisoformat(start_time_str)
+            else:
+                # Auto-detect from device state
+                device_state = coordinator.device_states.get(device_name, {})
+                start_time = device_state.get('started_time')
+                if not start_time:
+                    _LOGGER.error("Could not auto-detect start time")
+                    return
+
+            if end_time_str:
+                end_time = datetime.fromisoformat(end_time_str)
+            else:
+                end_time = datetime.now()
+
+            # Calculate duration
+            duration_minutes = int((end_time - start_time).total_seconds() / 60)
+
+            # TODO: Analyze power consumption from history
+            # For now, use a simple average
+            avg_power = device_config.get('device_power_consumption', 2000)
+
+            # Create program
+            if 'programs' not in coordinator.devices[device_name]:
+                coordinator.devices[device_name]['programs'] = {}
+
+            coordinator.devices[device_name]['programs'][program_name] = {
+                'duration': duration_minutes,
+                'power_consumption': avg_power,
+                'created_at': datetime.now().isoformat(),
+                'created_from': 'consumption_analysis',
+                'sample_start': start_time.isoformat(),
+                'sample_end': end_time.isoformat(),
+            }
+
+            await coordinator.async_save_devices()
+            _LOGGER.info(f"Created program '{program_name}' from consumption: {duration_minutes}min, ~{avg_power}W")
+
     # Register services
     hass.services.async_register(DOMAIN, "manual_start", handle_manual_start)
     hass.services.async_register(DOMAIN, "force_start_now", handle_force_start)
@@ -1218,6 +1639,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(DOMAIN, "cancel_scheduled_program", handle_cancel_program)
     hass.services.async_register(DOMAIN, "reset_schedule", handle_reset_schedule)
     hass.services.async_register(DOMAIN, "get_program_analytics", handle_get_analytics)
+
+    async def handle_recalculate_schedule(call):
+        """Force recalculation of optimal schedules (clears cache)."""
+        device_name = call.data.get("device_name")
+
+        if device_name:
+            # Clear cache for specific device
+            if device_name in coordinator.devices:
+                # Clear switch entity caches
+                for entity in hass.data[DOMAIN].get('switches', []):
+                    if hasattr(entity, '_device_name') and entity._device_name == device_name:
+                        entity._cached_schedule = None
+                        entity._last_schedule_calculation = None
+                        entity.async_write_ha_state()
+                        _LOGGER.info(f"Cleared schedule cache for {device_name}")
+        else:
+            # Clear cache for all devices
+            for entity in hass.data[DOMAIN].get('switches', []):
+                if hasattr(entity, '_cached_schedule'):
+                    entity._cached_schedule = None
+                    entity._last_schedule_calculation = None
+                    entity.async_write_ha_state()
+            _LOGGER.info("Cleared schedule cache for all devices")
+
+    # Register program management services
+    hass.services.async_register(DOMAIN, "add_program", handle_add_program)
+    hass.services.async_register(DOMAIN, "rename_program", handle_rename_program)
+    hass.services.async_register(DOMAIN, "modify_program", handle_modify_program)
+    hass.services.async_register(DOMAIN, "delete_program", handle_delete_program)
+    hass.services.async_register(DOMAIN, "start_named_program", handle_start_named_program)
+    hass.services.async_register(DOMAIN, "create_program_from_consumption", handle_create_program_from_consumption)
+    hass.services.async_register(DOMAIN, "recalculate_schedule", handle_recalculate_schedule)
     
     # Setup switch and sensor platforms
     await hass.config_entries.async_forward_entry_setups(entry, ["switch", "sensor"])
@@ -1241,6 +1694,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_remove(DOMAIN, "cancel_scheduled_program")
     hass.services.async_remove(DOMAIN, "reset_schedule")
     hass.services.async_remove(DOMAIN, "get_program_analytics")
+    hass.services.async_remove(DOMAIN, "add_program")
+    hass.services.async_remove(DOMAIN, "rename_program")
+    hass.services.async_remove(DOMAIN, "modify_program")
+    hass.services.async_remove(DOMAIN, "delete_program")
+    hass.services.async_remove(DOMAIN, "start_named_program")
+    hass.services.async_remove(DOMAIN, "create_program_from_consumption")
+    hass.services.async_remove(DOMAIN, "recalculate_schedule")
     
     unload_ok = await hass.config_entries.async_unload_platforms(entry, ["switch", "sensor"]) 
 
@@ -1339,8 +1799,8 @@ class TibberSmartCoordinator:
         await self._setup_monitoring(device_name)
         
         if self._async_add_entities:
-            from .switch import UnifiedTibberSwitch
-            new_entity = UnifiedTibberSwitch(self, device_name)
+            from .switch import TibberSchedulerSwitch
+            new_entity = TibberSchedulerSwitch(self, device_name)
             self._async_add_entities([new_entity])
         
         await self.async_save_devices()
@@ -1441,8 +1901,8 @@ class TibberSmartCoordinator:
         device_mode = device_config.get('device_mode', 'smart_delay')
         
         if device_mode == 'active_scheduler':
-            # Active scheduler: always cut off and reschedule optimally
-            await self._cutoff_and_reschedule_optimal(device_name)
+            # Active scheduler: check if already in optimal window before cutting off
+            await self._check_active_scheduler_cutoff(device_name)
         elif device_mode == 'smart_delay':
             # Smart delay: apply window-fitting logic
             await self._apply_window_fitting_logic(device_name)
@@ -1508,34 +1968,41 @@ class TibberSmartCoordinator:
             else:
                 _LOGGER.info(f"Savings too small ({savings_potential:.3f}€ < {min_savings:.3f}€) - allowing now")
         
-        # No suitable window or insufficient savings - allow to run now
-        device_state['state'] = 'running'
-        device_state['device_running'] = True
-        device_state['started_time'] = current_time
-        device_state['runs_today'] += 1
-        _LOGGER.info(f"ALLOWED NOW: {device_name} (no better alternative)")
+        # No suitable window or insufficient savings - check price threshold before allowing
+        price_data = await self._get_price_data()
+        if price_data:
+            await self._check_price_threshold(device_name, price_data)
+        else:
+            # Can't get price - allow to run as fallback
+            device_state['state'] = 'running'
+            device_state['device_running'] = True
+            device_state['started_time'] = current_time
+            device_state['runs_today'] += 1
+            _LOGGER.info(f"ALLOWED NOW: {device_name} (no price data available)")
 
     async def _get_optimal_windows_for_device(self, device_name: str) -> List[Dict]:
         """Get optimal windows for a specific device with caching."""
         device_config = self.devices[device_name]
-        
+
         # Check cache
         cache_key = f"{device_name}_{device_config.get('duration', 120)}"
-        if (self._optimal_windows_cache.get(cache_key) and 
+        if (self._optimal_windows_cache.get(cache_key) and
             self._forecast_cache_time and
             (datetime.now() - self._forecast_cache_time).total_seconds() < 3600):
             return self._optimal_windows_cache[cache_key]
-        
+
         # Get fresh forecast
         price_forecast = await self._get_price_forecast()
         if not price_forecast:
             return []
-        
+
         # Calculate optimal windows
         optimal_windows = self._calculate_optimal_windows(
-            price_forecast, 
+            price_forecast,
             device_config.get('duration', 120),
-            device_config.get('price_percentile_threshold', 0.3)  # Bottom 30% of prices
+            device_config.get('price_percentile_threshold', 0.3),  # Bottom 30% of prices
+            device_config.get('search_length', 8),  # Use configured search length
+            device_config  # Pass device config for strict_mode
         )
         
         # Cache result
@@ -1544,22 +2011,41 @@ class TibberSmartCoordinator:
         
         return optimal_windows
 
-    def _calculate_optimal_windows(self, price_forecast: List[Dict], duration_minutes: int, percentile_threshold: float) -> List[Dict]:
+    def _calculate_optimal_windows(self, price_forecast: List[Dict], duration_minutes: int, percentile_threshold: float, search_length_hours: int = 8, device_config: dict = None) -> List[Dict]:
         """Calculate optimal windows based on price percentiles."""
         if not price_forecast:
             return []
 
-        # Filter to current time onwards (include today + tomorrow)
+        # Filter to current time onwards using configured search length
         current_time = datetime.now()
+        search_end = current_time + timedelta(hours=search_length_hours)
 
-        # Include all future prices from current time to end of tomorrow
+        # Find last available data point to prevent scheduling beyond available data
+        last_data_time = max(p['time'] for p in price_forecast)
+
+        # Limit search_end to available data
+        if search_end > last_data_time:
+            _LOGGER.debug(f"Limiting search window to available data: {last_data_time.strftime('%H:%M')} instead of {search_end.strftime('%H:%M')}")
+            search_end = last_data_time
+
+        # Include only prices within search window AND available data
         future_prices = [
             p for p in price_forecast
-            if p['time'] >= current_time
+            if current_time <= p['time'] <= search_end
         ]
 
         if not future_prices:
             return []
+
+        # Apply strict mode filtering if enabled
+        if device_config and device_config.get('strict_mode', False):
+            price_threshold_strict = device_config.get('price_threshold', 0.30)
+            future_prices = [p for p in future_prices if p['price'] <= price_threshold_strict]
+            _LOGGER.info(f"Strict mode enabled - filtered to {len(future_prices)} periods <= {price_threshold_strict}€")
+
+            if not future_prices:
+                _LOGGER.info(f"No periods below price threshold {price_threshold_strict} in search window")
+                return []
 
         # Calculate price threshold (bottom percentile) from all available future prices
         all_prices = [p['price'] for p in future_prices]
@@ -1727,6 +2213,51 @@ class TibberSmartCoordinator:
             
             _LOGGER.info(f"Scheduled {device_name} to start in {delay_seconds/60:.0f} minutes")
 
+    async def _check_active_scheduler_cutoff(self, device_name: str):
+        """Check if active scheduler should cut off or allow device to run."""
+        device_config = self.devices[device_name]
+        device_state = self.device_states[device_name]
+        current_time = datetime.now()
+
+        # Get current price
+        price_data = await self._get_price_data()
+        if not price_data:
+            # Can't determine - allow to run
+            return
+
+        current_price = price_data['current_price']
+
+        # Find optimal window
+        optimal_window = await self._find_single_optimal_window(device_name)
+        if not optimal_window:
+            # No better window found - allow to run
+            _LOGGER.info(f"Active Scheduler: {device_name} running - no better window found")
+            return
+
+        optimal_start = optimal_window['start_time']
+        optimal_end = optimal_window['end_time']
+        optimal_price = optimal_window.get('avg_price', current_price)
+
+        # Check if we're already IN the optimal window
+        if optimal_start <= current_time <= optimal_end:
+            # We're in the optimal window - let it run
+            _LOGGER.info(f"Active Scheduler: {device_name} running in optimal window ({optimal_price:.3f}€/kWh)")
+            device_state['state'] = 'scheduled_running'
+            device_state['optimal_start'] = True
+            device_state['scheduled_start'] = optimal_start
+            device_state['scheduled_end'] = optimal_end
+            return
+
+        # Check if optimal window is significantly cheaper
+        savings_threshold = device_config.get('savings_threshold', 0.05)  # 5 cents minimum
+        if (optimal_price + savings_threshold) < current_price:
+            # Optimal window is significantly cheaper - cut off and reschedule
+            _LOGGER.info(f"Active Scheduler: Cutting off {device_name} - better window at {optimal_start.strftime('%H:%M')} ({optimal_price:.3f}€ vs current {current_price:.3f}€)")
+            await self._cutoff_and_reschedule_optimal(device_name)
+        else:
+            # Price difference too small - let it run
+            _LOGGER.info(f"Active Scheduler: {device_name} running - price difference too small ({current_price:.3f}€ vs optimal {optimal_price:.3f}€)")
+
     async def _cutoff_and_reschedule_optimal(self, device_name: str):
         """Cut off device and reschedule for absolute optimal time (Active Scheduler)."""
         device_config = self.devices[device_name]
@@ -1816,25 +2347,33 @@ class TibberSmartCoordinator:
             # Combine and convert
             all_prices = today_prices + tomorrow_prices
             price_forecast = []
-            
+
             for price_point in all_prices:
                 try:
                     time_str = price_point['starts_at']
                     price_time = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
                     if price_time.tzinfo:
                         price_time = price_time.replace(tzinfo=None)
-                    
+
                     price_forecast.append({
                         'time': price_time,
                         'price': float(price_point['total'])
                     })
                 except Exception:
                     continue
-            
+
+            # Sort by time to ensure chronological order
+            price_forecast.sort(key=lambda x: x['time'])
+
+            # Find the last valid data point to prevent scheduling beyond available data
+            if price_forecast:
+                last_valid_time = price_forecast[-1]['time']
+                _LOGGER.debug(f"Price data available until {last_valid_time.strftime('%Y-%m-%d %H:%M')}")
+
             # Cache result
             self._price_forecast_cache = price_forecast
             self._forecast_cache_time = current_time
-            
+
             _LOGGER.debug(f"Cached price forecast with {len(price_forecast)} data points")
             return price_forecast
             
@@ -1976,6 +2515,7 @@ class TibberSmartCoordinator:
         else:
             device_state['state'] = 'cut_off'
             device_state['waiting_for_cheap_price'] = True
+            device_state['device_running'] = False
             entities = device_config.get(CONF_ENTITIES, [])
             await self._turn_off_entities(entities)
             _LOGGER.warning(f"CUT OFF: {device_name} - price {current_price:.3f} > {price_threshold:.3f}")
@@ -2154,19 +2694,194 @@ class TibberSmartCoordinator:
         
         return analytics
 
+    async def _check_smart_delay_auto_starts(self):
+        """Check if any Smart Delay devices should automatically start now."""
+        current_time = datetime.now()
+
+        for device_name, device_config in self.devices.items():
+            if not device_config.get('enabled', True):
+                continue
+
+            device_mode = device_config.get('device_mode', 'smart_delay')
+            # Support smart_delay, price_protection, hybrid, and active_scheduler modes for auto-starts
+            if device_mode not in ['smart_delay', 'price_protection', 'hybrid', 'active_scheduler']:
+                continue
+
+            device_state = self.device_states.get(device_name, {})
+
+            # Skip if device is already running or automation is disabled
+            if (device_state.get('device_running') or
+                not device_state.get('scheduler_enabled', True)):
+                continue
+
+            # Check if we're in an optimal window
+            await self._check_optimal_window_start(device_name, current_time)
+
+    async def _check_optimal_window_start(self, device_name: str, current_time: datetime):
+        """Check if device should start based on optimal window."""
+        try:
+            device_config = self.devices[device_name]
+            device_state = self.device_states[device_name]
+
+            # Get optimal windows for this device
+            optimal_windows = await self._get_optimal_windows_for_device(device_name)
+            if not optimal_windows:
+                # Clear scheduled times if no optimal windows
+                device_state['scheduled_start'] = None
+                device_state['scheduled_end'] = None
+                return
+
+            # Update scheduled_start/end with first optimal window for display consistency
+            first_window = optimal_windows[0]
+            device_state['scheduled_start'] = first_window['start_time']
+            device_state['scheduled_end'] = first_window['end_time']
+
+            # Check if we're inside an optimal window NOW
+            for window in optimal_windows:
+                window_start = window['start_time']
+                window_end = window['end_time']
+
+                # Start immediately if current time is anywhere inside the optimal window
+                if window_start <= current_time <= window_end:
+                    _LOGGER.info(f"🚀 SMART DELAY AUTO START: {device_name} at optimal window {window_start.strftime('%H:%M')}")
+
+                    # Start the device
+                    entities = device_config.get(CONF_ENTITIES, [])
+                    if entities:
+                        await self._turn_on_entities(entities)
+
+                        # Generate program ID for recording
+                        program_id = f"{device_name}_{current_time.strftime('%Y%m%d_%H%M%S')}_auto"
+
+                        # Update device state
+                        device_state.update({
+                            'device_running': True,
+                            'started_time': current_time,
+                            'actual_start_time': current_time,
+                            'state': 'auto_optimal_start',
+                            'scheduled_start': window_start,
+                            'scheduled_end': window_end,
+                            'optimal_start': True,
+                            'program_id': program_id,
+                            'programmed_time': current_time,
+                            'estimated_duration': device_config.get('duration', 120),
+                            'runs_today': device_state.get('runs_today', 0) + 1
+                        })
+
+                        _LOGGER.info(
+                            f"✅ Auto-started {device_name} in optimal window "
+                            f"(avg price: {window.get('avg_price', 0):.3f}€/kWh)"
+                        )
+                    break
+
+        except Exception as e:
+            _LOGGER.error(f"Error checking optimal window start for {device_name}: {e}")
+
     async def update_schedules(self):
-        """Update schedules - check for delayed devices and active scheduling."""
+        """Update schedules - check for delayed devices, optimal windows, AND active scheduling."""
         price_data = await self._get_price_data()
         if not price_data:
             return
-        
+
+        _LOGGER.debug(f"Schedule update - price: {price_data.get('current_price', 0):.3f} EUR/kWh")
+
         # Check Smart Delay devices waiting for cheaper prices
         for device_name, device_state in self.device_states.items():
             if device_state.get('waiting_for_cheap_price'):
                 await self._check_resume_conditions(device_name, price_data)
-        
+
+        # Check RUNNING devices for price threshold violations
+        await self._check_running_devices_price(price_data)
+
+        # Check Smart Delay devices for automatic optimal window starts
+        await self._check_smart_delay_auto_starts()
+
         # Check Active Scheduler devices
         await self._check_active_scheduler_devices()
+
+    async def _check_running_devices_price(self, price_data: Dict):
+        """Check if running devices should be cut off due to high prices."""
+        current_price = price_data['current_price']
+
+        for device_name, device_state in self.device_states.items():
+            # Skip if device is not running
+            if not device_state.get('device_running'):
+                continue
+
+            # Skip if scheduler is disabled
+            if not device_state.get('scheduler_enabled', True):
+                continue
+
+            # Skip if device is in manual override mode
+            if device_state.get('manual_override_until'):
+                continue
+
+            device_config = self.devices.get(device_name)
+            if not device_config:
+                continue
+
+            device_mode = device_config.get('device_mode', 'smart_delay')
+
+            # For smart_delay and price_protection modes, check price threshold
+            if device_mode in ['smart_delay', 'price_protection']:
+                # Don't cut off devices that were started in an optimal window
+                if device_state.get('optimal_start'):
+                    _LOGGER.debug(f"Skipping price check for {device_name} - running in optimal window")
+                    continue
+
+                # Don't cut off if device was scheduled and we're in the scheduled window
+                scheduled_start = device_state.get('scheduled_start')
+                scheduled_end = device_state.get('scheduled_end')
+                if scheduled_start and scheduled_end:
+                    current_time = datetime.now()
+                    if scheduled_start <= current_time <= scheduled_end:
+                        _LOGGER.debug(f"Skipping price check for {device_name} - in scheduled window")
+                        continue
+
+                # Check if device is unprogrammed (no/low power consumption)
+                # Allow device to stay on for programming even at high prices
+                power_sensor = device_config.get('power_sensor')
+                if power_sensor and power_sensor != 'none':
+                    try:
+                        power_state = self.hass.states.get(power_sensor)
+                        if power_state and power_state.state not in ['unavailable', 'unknown']:
+                            current_power = float(power_state.state)
+                            min_power = device_config.get('min_power_detection', 15)
+
+                            # If power is below detection threshold, device is not programmed yet
+                            if current_power < min_power:
+                                _LOGGER.debug(f"Skipping cutoff for {device_name} - unprogrammed (power: {current_power}W < {min_power}W)")
+                                continue
+                    except (ValueError, TypeError):
+                        pass
+
+                price_threshold = device_config.get('price_threshold', 0.30)
+
+                if current_price > price_threshold:
+                    # Price is too high - cut off device
+                    _LOGGER.warning(f"Price rose above threshold for running device {device_name}: {current_price:.3f} > {price_threshold:.3f} EUR/kWh")
+
+                    device_state['state'] = 'cut_off'
+                    device_state['waiting_for_cheap_price'] = True
+                    device_state['device_running'] = False
+
+                    entities = device_config.get(CONF_ENTITIES, [])
+                    await self._turn_off_entities(entities)
+
+                    _LOGGER.info(f"CUT OFF running device: {device_name} due to high price")
+
+            # For active_scheduler, check if we should reschedule
+            elif device_mode == 'active_scheduler':
+                # Check if there's a much better window available
+                optimal_window = await self._find_single_optimal_window(device_name)
+                if optimal_window:
+                    optimal_price = optimal_window.get('avg_price', current_price)
+                    savings_threshold = device_config.get('savings_threshold', 0.05)
+
+                    # If current price is significantly higher than optimal, reschedule
+                    if current_price > (optimal_price + savings_threshold):
+                        _LOGGER.info(f"Active Scheduler: Rescheduling {device_name} - current price {current_price:.3f} too high vs optimal {optimal_price:.3f}")
+                        await self._cutoff_and_reschedule_optimal(device_name)
 
     async def _check_resume_conditions(self, device_name: str, price_data: Dict):
         """Check if delayed device can resume."""
@@ -2266,12 +2981,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     
-    # Set up periodic checks every 5 minutes
+    # Set up periodic checks every 1 minute for faster cutoff response
     async def update_schedules(now):
         await coordinator.update_schedules()
-    
+
     coordinator._unsub_update = async_track_time_interval(
-        hass, update_schedules, timedelta(minutes=5)
+        hass, update_schedules, timedelta(minutes=1)
     )
     
     # Track price changes

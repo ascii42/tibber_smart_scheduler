@@ -1,0 +1,408 @@
+# ============================================================
+# TIBBER PRICE CHART VISUALIZATION
+# Copy this to your dashboard for a beautiful price chart
+# ============================================================
+
+# Option 1: ApexCharts (Recommended - Most Beautiful)
+# Requires: HACS -> ApexCharts Card
+# ============================================================
+type: custom:apexcharts-card
+header:
+  show: true
+  title: Electricity Price Forecast
+  show_states: true
+  colorize_states: true
+graph_span: 24h
+span:
+  start: hour
+now:
+  show: true
+  label: Now
+  color: red
+series:
+  - entity: sensor.tibber_price_visualization
+    data_generator: |
+      return entity.attributes.apexcharts_data || [];
+    name: Price €/kWh
+    stroke_width: 3
+    type: area
+    color: '#2196F3'
+    opacity: 0.3
+    curve: smooth
+    group_by:
+      func: last
+      duration: 1h
+
+  # Show optimal window as highlighted area
+  - entity: sensor.tibber_price_visualization
+    name: Optimal Hours
+    type: area
+    color: green
+    opacity: 0.2
+    data_generator: |
+      const optimal = entity.attributes.optimal_hours || [];
+      const prices = entity.attributes.apexcharts_data || [];
+      return prices.filter(p => {
+        const hour = new Date(p.x).toLocaleTimeString('de-DE', {hour: '2-digit', minute: '2-digit'});
+        return optimal.includes(hour);
+      });
+
+yaxis:
+  - min: 0
+    decimals: 3
+    apex_config:
+      tickAmount: 6
+      title:
+        text: €/kWh
+      labels:
+        formatter: |
+          EVAL:function(value) {
+            return value.toFixed(3) + ' €';
+          }
+
+xaxis:
+  tooltip:
+    enabled: true
+
+apex_config:
+  chart:
+    height: 350px
+  dataLabels:
+    enabled: false
+  stroke:
+    curve: smooth
+  tooltip:
+    enabled: true
+    x:
+      format: 'dd.MM HH:mm'
+    y:
+      formatter: |
+        EVAL:function(value) {
+          return value.toFixed(3) + ' €/kWh';
+        }
+  annotations:
+    yaxis:
+      # Average price line
+      - y: EVAL:hass.states['sensor.tibber_price_visualization'].attributes.average_price
+        borderColor: '#FFA500'
+        label:
+          text: 'Ø ' + hass.states['sensor.tibber_price_visualization'].attributes.average_price.toFixed(3) + ' €'
+          style:
+            color: '#fff'
+            background: '#FFA500'
+
+---
+
+# Option 2: Mini Graph Card (Simple & Clean)
+# Requires: HACS -> Mini Graph Card
+# ============================================================
+type: custom:mini-graph-card
+entities:
+  - entity: sensor.tibber_price_visualization
+    attribute: current_price
+    name: Current Price
+    show_state: true
+    color: '#2196F3'
+hours_to_show: 24
+points_per_hour: 4
+line_width: 3
+animate: true
+show:
+  name: true
+  icon: true
+  state: true
+  graph: line
+  fill: fade
+  points: false
+  legend: false
+  extrema: true
+  average: true
+
+---
+
+# Option 3: Complete Dashboard with Statistics
+# ============================================================
+type: vertical-stack
+cards:
+  # Main Price Chart
+  - type: custom:apexcharts-card
+    header:
+      show: true
+      title: 💡 Tibber Electricity Prices
+      show_states: false
+    graph_span: 24h
+    now:
+      show: true
+      label: Jetzt
+    series:
+      - entity: sensor.tibber_price_visualization
+        data_generator: |
+          return entity.attributes.apexcharts_data || [];
+        name: Preis
+        stroke_width: 2
+        type: line
+        color: '#2196F3'
+    yaxis:
+      - min: 0
+        decimals: 3
+        apex_config:
+          title:
+            text: €/kWh
+
+  # Price Statistics
+  - type: glance
+    title: Preis-Statistik
+    show_name: true
+    show_state: true
+    columns: 4
+    entities:
+      - entity: sensor.tibber_price_visualization
+        name: Verfügbar
+        icon: mdi:clock-outline
+
+      - entity: sensor.tibber_price_visualization
+        attribute: current_price
+        name: Aktuell
+        icon: mdi:flash
+        unit: €/kWh
+
+      - entity: sensor.tibber_price_visualization
+        attribute: min_price
+        name: Minimum
+        icon: mdi:arrow-down-bold
+        unit: €/kWh
+
+      - entity: sensor.tibber_price_visualization
+        attribute: max_price
+        name: Maximum
+        icon: mdi:arrow-up-bold
+        unit: €/kWh
+
+  # Optimal Hours Display
+  - type: markdown
+    content: |
+      ### 🟢 Günstigste Stunden (nächste 24h)
+      {% set optimal = state_attr('sensor.tibber_price_visualization', 'optimal_hours') %}
+      {% if optimal %}
+      **{{ optimal | join(', ') }}**
+
+      *Preis ≤ 70% vom Durchschnitt*
+      {% else %}
+      Keine Daten verfügbar
+      {% endif %}
+
+      **Durchschnittspreis:** {{ state_attr('sensor.tibber_price_visualization', 'average_price') | round(3) }} €/kWh
+
+---
+
+# Option 4: Color-Coded Bar Chart
+# Shows each hour with color coding
+# ============================================================
+type: custom:bar-card
+entity: sensor.tibber_price_visualization
+title: Hourly Electricity Prices
+height: 50px
+width: 100%
+columns: 24
+direction: up
+min: 0
+max: auto
+severity:
+  - color: '#00C853'
+    from: 0
+    to: 0.15
+  - color: '#64DD17'
+    from: 0.15
+    to: 0.20
+  - color: '#FDD835'
+    from: 0.20
+    to: 0.25
+  - color: '#FF6F00'
+    from: 0.25
+    to: 0.30
+  - color: '#D32F2F'
+    from: 0.30
+    to: 1.00
+unit_of_measurement: €/kWh
+positions:
+  icon: 'off'
+  indicator: 'off'
+  name: top
+  value: inside
+style: |
+  bar-card-currentbar, bar-card-backgroundbar {
+    border-radius: 4px;
+  }
+
+---
+
+# Option 5: Combined Chart + Device Schedule
+# Shows prices AND when your devices are scheduled
+# ============================================================
+type: vertical-stack
+cards:
+  # Price Chart with Device Windows
+  - type: custom:apexcharts-card
+    header:
+      title: Strompreis & Geräte-Zeitfenster
+    graph_span: 24h
+    now:
+      show: true
+    all_series_config:
+      stroke_width: 2
+    series:
+      # Price line
+      - entity: sensor.tibber_price_visualization
+        data_generator: |
+          return entity.attributes.apexcharts_data || [];
+        name: Strompreis
+        type: line
+        color: blue
+
+      # Dishwasher schedule window (if exists)
+      - entity: switch.tibber_scheduler_dishwasher
+        attribute: next_start_datetime
+        name: Spülmaschine
+        type: area
+        color: green
+        opacity: 0.2
+        data_generator: |
+          const start = entity.attributes.next_start_datetime;
+          const stop = entity.attributes.next_stop_datetime;
+          if (!start || !stop) return [];
+
+          return [
+            {x: new Date(start).getTime(), y: 0.5},
+            {x: new Date(stop).getTime(), y: 0.5}
+          ];
+
+    yaxis:
+      - min: 0
+        decimals: 3
+
+  # Device Schedule Overview
+  - type: entities
+    title: Geplante Geräte-Starts
+    entities:
+      - entity: switch.tibber_scheduler_dishwasher
+        type: attribute
+        attribute: next_start
+        name: Spülmaschine
+        icon: mdi:dishwasher
+      - entity: switch.tibber_scheduler_dishwasher
+        type: attribute
+        attribute: window_status
+        name: Status
+
+---
+
+# Option 6: Plotly Graph (Advanced, Very Customizable)
+# Requires: HACS -> Plotly Graph Card
+# ============================================================
+type: custom:plotly-graph
+hours_to_show: 24
+refresh_interval: 300
+entities:
+  - entity: sensor.tibber_price_visualization
+    name: Electricity Price
+    yaxis: y1
+    line:
+      width: 3
+      shape: spline
+      color: rgb(33, 150, 243)
+    fill: tozeroy
+    fillcolor: rgba(33, 150, 243, 0.1)
+layout:
+  showlegend: true
+  height: 400
+  margin:
+    l: 50
+    r: 50
+    t: 50
+    b: 50
+  yaxis:
+    title: Price (€/kWh)
+    fixedrange: false
+  xaxis:
+    title: Time
+    showgrid: true
+  shapes:
+    # Add a horizontal line for average price
+    - type: line
+      x0: 0
+      x1: 1
+      xref: paper
+      y0: EVAL:states['sensor.tibber_price_visualization'].attributes.average_price
+      y1: EVAL:states['sensor.tibber_price_visualization'].attributes.average_price
+      line:
+        color: orange
+        width: 2
+        dash: dot
+
+---
+
+# Option 7: Simple Entities Card with Chart Data
+# No custom cards needed!
+# ============================================================
+type: entities
+title: Strompreis Übersicht
+entities:
+  - entity: sensor.tibber_price_visualization
+    name: Verfügbare Stunden
+    icon: mdi:clock
+
+  - type: divider
+
+  - type: attribute
+    entity: sensor.tibber_price_visualization
+    attribute: current_price
+    name: Aktueller Preis
+    suffix: €/kWh
+    icon: mdi:flash
+
+  - type: attribute
+    entity: sensor.tibber_price_visualization
+    attribute: average_price
+    name: Durchschnitt
+    suffix: €/kWh
+    icon: mdi:chart-line
+
+  - type: attribute
+    entity: sensor.tibber_price_visualization
+    attribute: min_price
+    name: Günstigster Preis
+    suffix: €/kWh
+    icon: mdi:arrow-down
+
+  - type: attribute
+    entity: sensor.tibber_price_visualization
+    attribute: max_price
+    name: Teuerster Preis
+    suffix: €/kWh
+    icon: mdi:arrow-up
+
+  - type: divider
+
+  - type: custom:hui-element
+    card_type: markdown
+    content: |
+      **Günstige Stunden:**
+      {{ state_attr('sensor.tibber_price_visualization', 'optimal_hours') | join(', ') }}
+
+---
+
+# INSTALLATION NOTES:
+#
+# For ApexCharts:
+#   HACS -> Frontend -> Search "ApexCharts Card"
+#
+# For Mini Graph Card:
+#   HACS -> Frontend -> Search "Mini Graph Card"
+#
+# For Bar Card:
+#   HACS -> Frontend -> Search "Bar Card"
+#
+# For Plotly:
+#   HACS -> Frontend -> Search "Plotly Graph Card"
+#
+# After installing any card, restart Home Assistant!

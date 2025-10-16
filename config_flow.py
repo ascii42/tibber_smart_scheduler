@@ -48,9 +48,22 @@ class TibberSchedulerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors[CONF_TIBBER_SENSOR] = "sensor_not_found"
             else:
                 _LOGGER.info(f"Config flow: Creating entry with sensor: {tibber_sensor}")
+
+                # Include API token and global settings if provided
+                data = {CONF_TIBBER_SENSOR: tibber_sensor}
+                api_token = user_input.get("tibber_api_token", "").strip()
+                if api_token:
+                    data["tibber_api_token"] = api_token
+                    _LOGGER.info("Tibber API token provided - will use as fallback")
+
+                # Global price level settings
+                data["global_min_price_level"] = user_input.get("global_min_price_level", 0.15)
+                data["price_stability_threshold"] = user_input.get("price_stability_threshold", 0.20)
+                data["enable_always_on_mode"] = user_input.get("enable_always_on_mode", False)
+
                 return self.async_create_entry(
                     title="Tibber Smart Scheduler",
-                    data={CONF_TIBBER_SENSOR: tibber_sensor}
+                    data=data
                 )
 
         # Get ALL sensors - comprehensive approach for Tibber sensors
@@ -110,6 +123,14 @@ class TibberSchedulerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=vol.Schema({
                 vol.Required(CONF_TIBBER_SENSOR): vol.In(all_sensors),
+                vol.Optional("tibber_api_token", default=""): str,
+                vol.Optional("global_min_price_level", default=0.15): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=1.0)
+                ),
+                vol.Optional("price_stability_threshold", default=0.20): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=1.0)
+                ),
+                vol.Optional("enable_always_on_mode", default=False): cv.boolean,
             }),
             errors=errors,
             description_placeholders={
@@ -139,21 +160,27 @@ class TibberSchedulerOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             action = user_input.get("menu_action")
             _LOGGER.info(f"Options flow: Selected action: {action}")
-            
+
             if action == "add_device":
                 return await self.async_step_add_device()
-            elif action == "edit_device": 
+            elif action == "edit_device":
                 return await self.async_step_edit_device()
             elif action == "remove_device":
                 return await self.async_step_remove_device()
-        
+            elif action == "configure_api":
+                return await self.async_step_configure_api()
+            elif action == "global_settings":
+                return await self.async_step_global_settings()
+
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema({
                 vol.Required("menu_action"): vol.In({
                     "add_device": "Add New Device",
                     "edit_device": "Edit Device",
-                    "remove_device": "Remove Device"
+                    "remove_device": "Remove Device",
+                    "configure_api": "Configure Tibber API Token",
+                    "global_settings": "Global Price Settings"
                 }),
             }),
         )
@@ -307,6 +334,7 @@ class TibberSchedulerOptionsFlow(config_entries.OptionsFlow):
                 vol.Optional("export_csv_enabled", default=False): cv.boolean,
                 
                 # === PRICE THRESHOLDS (ENHANCED) ===
+                vol.Optional("strict_mode", default=False): cv.boolean,
                 vol.Optional("price_threshold", default=0.30): vol.All(vol.Coerce(float), vol.Range(min=0.01, max=5.0)),
                 vol.Optional("price_cutoff_threshold", default=0.40): vol.All(vol.Coerce(float), vol.Range(min=0.01, max=5.0)),
                 vol.Optional("price_resume_threshold", default=0.25): vol.All(vol.Coerce(float), vol.Range(min=0.01, max=5.0)),
@@ -489,6 +517,7 @@ class TibberSchedulerOptionsFlow(config_entries.OptionsFlow):
                 vol.Optional("export_csv_enabled", default=device_config.get("export_csv_enabled", False)): cv.boolean,
                 
                 # === PRICE THRESHOLDS (ENHANCED) ===
+                vol.Optional("strict_mode", default=device_config.get("strict_mode", False)): cv.boolean,
                 vol.Optional("price_threshold", default=device_config.get("price_threshold", 0.30)): vol.All(vol.Coerce(float), vol.Range(min=0.01, max=5.0)),
                 vol.Optional("price_cutoff_threshold", default=device_config.get("price_cutoff_threshold", 0.40)): vol.All(vol.Coerce(float), vol.Range(min=0.01, max=5.0)),
                 vol.Optional("price_resume_threshold", default=device_config.get("price_resume_threshold", 0.25)): vol.All(vol.Coerce(float), vol.Range(min=0.01, max=5.0)),
@@ -589,5 +618,162 @@ class TibberSchedulerOptionsFlow(config_entries.OptionsFlow):
             }),
             description_placeholders={
                 "device_count": str(len(coordinator.devices))
+            }
+        )
+
+    async def async_step_configure_api(self, user_input=None):
+        """Configure Tibber API token and settings."""
+        _LOGGER.info("Options flow: Configure API step")
+        errors = {}
+
+        if user_input is not None:
+            _LOGGER.info("Options flow: API configuration provided")
+
+            try:
+                # Get current config data
+                new_data = dict(self.config_entry.data)
+
+                # Update or add API token
+                api_token = user_input.get("tibber_api_token", "").strip()
+                if api_token:
+                    new_data["tibber_api_token"] = api_token
+                    _LOGGER.info("Tibber API token updated")
+
+                    # Test API connection and get homes
+                    try:
+                        from .tibber_api import TibberApiClient
+                        from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+                        session = async_get_clientsession(self.hass)
+                        client = TibberApiClient(api_token, session=session)
+                        homes = await client.get_homes()
+
+                        if homes:
+                            _LOGGER.info(f"✅ API test successful: Found {len(homes)} home(s)")
+                            # Store available homes for reference
+                            new_data["tibber_homes_count"] = len(homes)
+                            if len(homes) == 1:
+                                new_data["tibber_home_id"] = homes[0].get("id")
+                                new_data["tibber_home_name"] = homes[0].get("appNickname", "Unknown")
+                        else:
+                            _LOGGER.warning("⚠️ API test: No homes found")
+
+                    except Exception as api_error:
+                        _LOGGER.warning(f"⚠️ API test failed: {api_error}")
+                        errors["tibber_api_token"] = "api_test_failed"
+
+                elif "tibber_api_token" in new_data:
+                    # Remove token if empty string provided
+                    del new_data["tibber_api_token"]
+                    if "tibber_home_id" in new_data:
+                        del new_data["tibber_home_id"]
+                    if "tibber_home_name" in new_data:
+                        del new_data["tibber_home_name"]
+                    if "tibber_homes_count" in new_data:
+                        del new_data["tibber_homes_count"]
+                    _LOGGER.info("Tibber API token removed")
+
+                # Optional: Home ID for multi-home accounts
+                home_id = user_input.get("tibber_home_id", "").strip()
+                if home_id:
+                    new_data["tibber_home_id"] = home_id
+
+                if not errors:
+                    # Update config entry
+                    self.hass.config_entries.async_update_entry(
+                        self.config_entry,
+                        data=new_data
+                    )
+
+                    # Reload the integration to apply changes
+                    await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+
+                    return self.async_create_entry(title="", data={})
+
+            except Exception as e:
+                _LOGGER.error(f"Options flow: Error updating API config: {e}")
+                errors["base"] = "api_config_error"
+
+        # Get current values
+        current_token = self.config_entry.data.get("tibber_api_token", "")
+        current_home_id = self.config_entry.data.get("tibber_home_id", "")
+        homes_count = self.config_entry.data.get("tibber_homes_count", 0)
+        home_name = self.config_entry.data.get("tibber_home_name", "")
+
+        # Build status message
+        if current_token:
+            if homes_count > 0:
+                status = f"✅ Connected ({homes_count} home(s))"
+                if home_name:
+                    status += f" - {home_name}"
+            else:
+                status = "⚠️ Token set but not tested"
+        else:
+            status = "❌ Not configured"
+
+        return self.async_show_form(
+            step_id="configure_api",
+            data_schema=vol.Schema({
+                vol.Optional("tibber_api_token", default=current_token): str,
+                vol.Optional("tibber_home_id", default=current_home_id,
+                           description="Optional: Specific Home ID (for multi-home accounts)"): str,
+            }),
+            errors=errors,
+            description_placeholders={
+                "current_status": status,
+                "info": "Get your token from: https://developer.tibber.com/settings/access-token"
+            }
+        )
+
+    async def async_step_global_settings(self, user_input=None):
+        """Configure global price level settings."""
+        _LOGGER.info("Options flow: Global settings step")
+        errors = {}
+
+        if user_input is not None:
+            try:
+                # Update config entry data
+                new_data = dict(self.config_entry.data)
+
+                new_data["global_min_price_level"] = user_input.get("global_min_price_level", 0.15)
+                new_data["price_stability_threshold"] = user_input.get("price_stability_threshold", 0.20)
+                new_data["enable_always_on_mode"] = user_input.get("enable_always_on_mode", False)
+
+                # Update entry
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    data=new_data
+                )
+
+                # Reload integration to apply changes
+                await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+
+                return self.async_create_entry(title="", data={})
+
+            except Exception as e:
+                _LOGGER.error(f"Options flow: Error updating global settings: {e}")
+                errors["base"] = "global_settings_error"
+
+        # Get current values
+        current_min_level = self.config_entry.data.get("global_min_price_level", 0.15)
+        current_stability = self.config_entry.data.get("price_stability_threshold", 0.20)
+        current_always_on = self.config_entry.data.get("enable_always_on_mode", False)
+
+        return self.async_show_form(
+            step_id="global_settings",
+            data_schema=vol.Schema({
+                vol.Optional("global_min_price_level", default=current_min_level): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=1.0)
+                ),
+                vol.Optional("price_stability_threshold", default=current_stability): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=1.0)
+                ),
+                vol.Optional("enable_always_on_mode", default=current_always_on): cv.boolean,
+            }),
+            errors=errors,
+            description_placeholders={
+                "info": "Global Price Level: Keep devices on if price stays below this level. "
+                        "Stability Threshold: How much lower (%) price must drop to trigger scheduling. "
+                        "Example: If level=0.20€ and threshold=20%, scheduling only kicks in if price drops below 0.16€"
             }
         )

@@ -1,0 +1,320 @@
+# Example Dashboard Cards for Tibber Smart Scheduler
+# These show the new features: Price Visualization, Running Program, and Program Management
+
+# ============================================================
+# 1. PRICE VISUALIZATION CHART (ApexCharts)
+# ============================================================
+# Shows upcoming electricity prices with color coding
+type: custom:apexcharts-card
+header:
+  show: true
+  title: Tibber Price Forecast
+  show_states: true
+graph_span: 48h
+now:
+  show: true
+  label: Now
+series:
+  - entity: sensor.tibber_price_visualization
+    data_generator: |
+      return entity.attributes.apexcharts_data;
+    name: Price
+    color: auto
+    stroke_width: 2
+    type: line
+yaxis:
+  - min: 0
+    decimals: 3
+    apex_config:
+      tickAmount: 5
+      title:
+        text: €/kWh
+xaxis:
+  tooltip:
+    enabled: true
+
+---
+
+# ============================================================
+# 2. PRICE STATISTICS CARD
+# ============================================================
+# Shows current, average, min, and max prices
+type: entities
+title: Price Statistics
+entities:
+  - entity: sensor.tibber_price_visualization
+    name: Available Hours
+    icon: mdi:clock-outline
+  - type: attribute
+    entity: sensor.tibber_price_visualization
+    attribute: current_price
+    name: Current Price
+    suffix: €/kWh
+  - type: attribute
+    entity: sensor.tibber_price_visualization
+    attribute: average_price
+    name: Average Price
+    suffix: €/kWh
+  - type: attribute
+    entity: sensor.tibber_price_visualization
+    attribute: min_price
+    name: Minimum Price
+    suffix: €/kWh
+  - type: attribute
+    entity: sensor.tibber_price_visualization
+    attribute: max_price
+    name: Maximum Price
+    suffix: €/kWh
+
+---
+
+# ============================================================
+# 3. RUNNING PROGRAM CARD
+# ============================================================
+# Shows the currently running program with progress
+type: vertical-stack
+cards:
+  - type: entity
+    entity: sensor.dishwasher_running_program
+    name: Dishwasher Program
+    icon: mdi:dishwasher
+
+  - type: conditional
+    conditions:
+      - entity: sensor.dishwasher_running_program
+        state_not: "idle"
+    card:
+      type: entities
+      entities:
+        - type: attribute
+          entity: sensor.dishwasher_running_program
+          attribute: runtime_minutes
+          name: Running for
+          suffix: minutes
+        - type: attribute
+          entity: sensor.dishwasher_running_program
+          attribute: remaining_minutes
+          name: Remaining
+          suffix: minutes
+        - type: attribute
+          entity: sensor.dishwasher_running_program
+          attribute: progress_percent
+          name: Progress
+          suffix: "%"
+
+---
+
+# ============================================================
+# 4. PROGRAM MANAGEMENT BUTTONS
+# ============================================================
+# Quick access to program management services
+type: entities
+title: Program Management
+entities:
+  - type: button
+    name: Add Quick Wash Program
+    icon: mdi:plus-circle
+    action_name: Add
+    tap_action:
+      action: call-service
+      service: tibber_smart_scheduler.add_program
+      service_data:
+        device_name: dishwasher
+        program_name: Quick Wash
+        duration: 60
+        power_consumption: 1200
+
+  - type: button
+    name: Add Eco Program
+    icon: mdi:plus-circle
+    action_name: Add
+    tap_action:
+      action: call-service
+      service: tibber_smart_scheduler.add_program
+      service_data:
+        device_name: dishwasher
+        program_name: Eco Wash
+        duration: 180
+        power_consumption: 800
+
+  - type: button
+    name: Start Quick Wash
+    icon: mdi:play
+    action_name: Start
+    tap_action:
+      action: call-service
+      service: tibber_smart_scheduler.start_named_program
+      service_data:
+        device_name: dishwasher
+        program_name: Quick Wash
+
+---
+
+# ============================================================
+# 5. COMPLETE DEVICE CONTROL PANEL
+# ============================================================
+# Comprehensive control panel for one device
+type: vertical-stack
+cards:
+  # Device Status
+  - type: entities
+    title: Dishwasher Control
+    entities:
+      - entity: switch.tibber_scheduler_dishwasher
+        name: Scheduler Enabled
+      - entity: switch.dishwasher_power
+        name: Power
+      - entity: switch.dishwasher_automatic_mode
+        name: Automatic Mode
+      - entity: sensor.dishwasher_running_program
+        name: Current Program
+
+  # Running Program Details (only shown when active)
+  - type: conditional
+    conditions:
+      - entity: sensor.dishwasher_running_program
+        state_not: "idle"
+    card:
+      type: gauge
+      entity: sensor.dishwasher_running_program
+      attribute: progress_percent
+      name: Program Progress
+      min: 0
+      max: 100
+      needle: true
+      severity:
+        green: 0
+        yellow: 50
+        red: 90
+
+  # Schedule Information
+  - type: entities
+    title: Schedule
+    entities:
+      - type: attribute
+        entity: switch.tibber_scheduler_dishwasher
+        attribute: next_start
+        name: Next Start
+      - type: attribute
+        entity: switch.tibber_scheduler_dishwasher
+        attribute: next_stop
+        name: Next Stop
+      - type: attribute
+        entity: switch.tibber_scheduler_dishwasher
+        attribute: optimal_avg_price
+        name: Optimal Price
+        suffix: €/kWh
+
+---
+
+# ============================================================
+# 6. PROGRAM CREATION FROM CONSUMPTION
+# ============================================================
+# Create a program based on actual power consumption
+type: entities
+title: Create Program from Current Run
+entities:
+  - type: button
+    name: Save as "Normal Wash"
+    icon: mdi:content-save
+    action_name: Save
+    tap_action:
+      action: call-service
+      service: tibber_smart_scheduler.create_program_from_consumption
+      service_data:
+        device_name: dishwasher
+        program_name: Normal Wash
+        # Leave start_time and end_time blank to auto-detect
+
+---
+
+# ============================================================
+# 7. OPTIMAL HOURS VISUALIZATION
+# ============================================================
+# Shows which hours are optimal for running devices
+type: markdown
+title: Optimal Hours (Next 24h)
+content: |
+  {% set optimal = state_attr('sensor.tibber_price_visualization', 'optimal_hours') %}
+  {% if optimal %}
+  **Best times to run devices:**
+  {{ optimal | join(', ') }}
+
+  *These hours have prices ≤70% of average*
+  {% else %}
+  No optimal hours data available
+  {% endif %}
+
+---
+
+# ============================================================
+# 8. PRICE BAR CHART (Custom Bar Card)
+# ============================================================
+# Alternative visualization using bar-card
+type: custom:bar-card
+entity: sensor.tibber_price_visualization
+title: Price Forecast
+unit_of_measurement: hours
+height: 200px
+columns: 24
+severity:
+  - color: green
+    from: 0
+    to: 0.20
+  - color: yellow
+    from: 0.20
+    to: 0.30
+  - color: orange
+    from: 0.30
+    to: 0.40
+  - color: red
+    from: 0.40
+    to: 1.00
+
+---
+
+# ============================================================
+# 9. SERVICE CALL EXAMPLES (Developer Tools)
+# ============================================================
+
+# Add a new program:
+# service: tibber_smart_scheduler.add_program
+# data:
+#   device_name: dishwasher
+#   program_name: Intensive
+#   duration: 150
+#   power_consumption: 2200
+
+# Rename a program:
+# service: tibber_smart_scheduler.rename_program
+# data:
+#   device_name: dishwasher
+#   old_name: Intensive
+#   new_name: Heavy Duty
+
+# Modify a program:
+# service: tibber_smart_scheduler.modify_program
+# data:
+#   device_name: dishwasher
+#   program_name: Heavy Duty
+#   duration: 160
+#   power_consumption: 2400
+
+# Delete a program:
+# service: tibber_smart_scheduler.delete_program
+# data:
+#   device_name: dishwasher
+#   program_name: Heavy Duty
+
+# Start a named program:
+# service: tibber_smart_scheduler.start_named_program
+# data:
+#   device_name: dishwasher
+#   program_name: Eco Wash
+
+# Create program from current consumption:
+# service: tibber_smart_scheduler.create_program_from_consumption
+# data:
+#   device_name: dishwasher
+#   program_name: Auto Detected Wash
+#   # Leave start_time/end_time blank to auto-detect from running program

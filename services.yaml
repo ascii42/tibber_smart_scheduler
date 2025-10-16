@@ -70,3 +70,170 @@ update_schedules:
     entity:
       domain: switch
       integration: tibber_smart_scheduler
+
+add_program:
+  name: Add Program
+  description: "Create a new named program for a device"
+  fields:
+    device_name:
+      name: Device Name
+      description: "Name of the device"
+      required: true
+      selector:
+        text:
+    program_name:
+      name: Program Name
+      description: "Name for the program (e.g., 'Eco Wash', 'Quick Dry')"
+      required: true
+      selector:
+        text:
+    duration:
+      name: Duration
+      description: "Program duration in minutes"
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 1440
+          unit_of_measurement: "minutes"
+    power_consumption:
+      name: Power Consumption
+      description: "Average power consumption in watts (optional)"
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 10000
+          unit_of_measurement: "W"
+
+rename_program:
+  name: Rename Program
+  description: "Rename an existing program"
+  fields:
+    device_name:
+      name: Device Name
+      description: "Name of the device"
+      required: true
+      selector:
+        text:
+    old_name:
+      name: Old Name
+      description: "Current program name"
+      required: true
+      selector:
+        text:
+    new_name:
+      name: New Name
+      description: "New program name"
+      required: true
+      selector:
+        text:
+
+modify_program:
+  name: Modify Program
+  description: "Modify program settings"
+  fields:
+    device_name:
+      name: Device Name
+      description: "Name of the device"
+      required: true
+      selector:
+        text:
+    program_name:
+      name: Program Name
+      description: "Name of the program to modify"
+      required: true
+      selector:
+        text:
+    duration:
+      name: Duration
+      description: "New duration in minutes (optional)"
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 1440
+          unit_of_measurement: "minutes"
+    power_consumption:
+      name: Power Consumption
+      description: "New average power consumption in watts (optional)"
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 10000
+          unit_of_measurement: "W"
+
+delete_program:
+  name: Delete Program
+  description: "Delete a program"
+  fields:
+    device_name:
+      name: Device Name
+      description: "Name of the device"
+      required: true
+      selector:
+        text:
+    program_name:
+      name: Program Name
+      description: "Name of the program to delete"
+      required: true
+      selector:
+        text:
+
+start_named_program:
+  name: Start Named Program
+  description: "Start a device with a specific named program"
+  fields:
+    device_name:
+      name: Device Name
+      description: "Name of the device"
+      required: true
+      selector:
+        text:
+    program_name:
+      name: Program Name
+      description: "Name of the program to start"
+      required: true
+      selector:
+        text:
+
+create_program_from_consumption:
+  name: Create Program from Consumption
+  description: "Analyze power consumption and create a program"
+  fields:
+    device_name:
+      name: Device Name
+      description: "Name of the device"
+      required: true
+      selector:
+        text:
+    program_name:
+      name: Program Name
+      description: "Name for the new program"
+      required: true
+      selector:
+        text:
+    start_time:
+      name: Start Time
+      description: "When did the program start (ISO format or leave blank for auto-detect)"
+      required: false
+      selector:
+        text:
+    end_time:
+      name: End Time
+      description: "When did the program end (ISO format or leave blank for now)"
+      required: false
+      selector:
+        text:
+
+recalculate_schedule:
+  name: Recalculate Schedule
+  description: "Force recalculation of optimal schedule (clears cache)"
+  fields:
+    device_name:
+      name: Device Name
+      description: "Name of the device (leave blank for all devices)"
+      required: false
+      selector:
+        text:
